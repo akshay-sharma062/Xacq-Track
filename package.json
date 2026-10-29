@@ -14,7 +14,10 @@
     "db:migrate": "tsx prisma/migrate.ts",
     "db:seed": "tsx prisma/seed.ts",
     "db:generate": "prisma generate",
-    "xt:build": "node xt/build.mjs"
+    "xt:build": "node xt/build.mjs",
+    "jobs:pull": "tsx src/jobs/pull-scheduler.ts",
+    "pull:once": "tsx src/jobs/pull-scheduler.ts once",
+    "meta:verify-token": "node scripts/verify-meta-token.mjs"
   },
   "engines": {
     "node": ">=22"

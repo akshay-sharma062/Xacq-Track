@@ -392,6 +392,23 @@ model Spend {
 }
 
 // ---------------------------------------------------------------------------
+// FxRate — stored daily currency rates (spec 5.7: "using a stored daily FX
+// rate"). Spend rows keep the rate they were converted with, so reports never
+// re-convert at report time (no live-rate drift). One row per (date, currency).
+// ---------------------------------------------------------------------------
+model FxRate {
+  id        String  @id @default(cuid())
+  date      String // "YYYY-MM-DD" (UTC day the rate applies to)
+  currency  String // ISO-4217, e.g. "USD"
+  rateToInr Float // 1 unit of currency == rateToInr INR
+  source    String  @default("open.er-api.com")
+  fetchedAt DateTime @default(now())
+
+  @@unique([date, currency])
+  @@index([currency, date])
+}
+
+// ---------------------------------------------------------------------------
 // Sales follow-ups (spec 4: Task/Note/Call)
 // ---------------------------------------------------------------------------
 model Task {

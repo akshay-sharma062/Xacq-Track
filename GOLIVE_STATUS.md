@@ -4,7 +4,7 @@ Single source of truth for "what is real vs. dummy". A path is **LIVE** only
 when a real-data verification has been shown (commit SHA + output, dated).
 Until then it is **MOCK** (seed/simulate/fake) or **BLOCKED: needs X**.
 
-Last updated: 2026-07-07 (G0 ritual complete) · owner: lead engineer
+Last updated: G1 complete (token-dependent sub-paths BLOCKED) · owner: lead engineer
 
 ## Data stores
 
@@ -17,11 +17,16 @@ Last updated: 2026-07-07 (G0 ritual complete) · owner: lead engineer
 
 | Item | File | Current | Live path | Status | Evidence |
 |---|---|---|---|---|---|
-| Ads pull (spend/entities) | `src/lib/meta/pull.ts` | `simulatePull()` fixture behind no token; `pullAdAccount()` exists, unverified | Real Marketing API via `META_ACCESS_TOKEN` | **BLOCKED: needs system-user token + ad account IDs** | G1 |
-| FX rate (USD→INR) | `src/lib/fx.ts` | Hardcoded demo rate (84) in seed; no live fetch | Daily rate fetch + store | **MOCK** | G1 |
-| Pull scheduling | `src/lib/meta/pull.ts` | Manual trigger only (button/route) | Nightly + 3-hourly durable job | **MOCK** | G1 |
+| Ads pull (spend/entities) | `src/lib/meta/pull.ts` | Real path DONE: campaigns→adsets→creatives→**daily** insights, pagination, thumbnails, per-account error isolation, stored billing currency; `simulatePull` behind `META_SIMULATE` flag; 7+ new tests green | Live pull vs token + 3-ad spot-check ≤1% | **BLOCKED: needs `META_ACCESS_TOKEN` + ad account IDs in .env** (code ready) | G1 — typecheck+100 tests+build clean; verify script `pnpm meta:verify-token` staged |
+| FX rate (USD→INR) | `src/lib/fx-store.ts` + `FxRate` table | **Stored daily rate, live-fetched-once + persisted** (spec 5.7: no report-time re-convert); `resolveDayRates` feeds every pull; 5 tests | Live rate verified | **LIVE** | `open.er-api.com` USD→INR **95.29615** fetched 2026-10-29 (real, no key) — recorded in G1 evidence |
+| Pull scheduling | `src/jobs/pull-scheduler.ts` + `POST /api/jobs/pull` | Nightly 02:00 (30d backfill) + 07/10/13/16/19/22 (1d), pure `cadenceForHour` (tested); resident loop `pnpm jobs:pull` + durable cron trigger with `CRON_PULL_SECRET`; idempotent upserts | Platform cron in prod (Vercel/host) | **MOCK** (code-complete, tested; live firing blocked on token) | G1 — 6 cadence tests green |
 | Instant Forms | `adapters/meta.ts` + `api/webhooks/[platform]` | Adapter + hub-challenge handshake implemented; not subscribed to any real Page | Real leadgen webhook on a public URL | **BLOCKED: needs Page ID + webhook subscription + public URL** | G2 |
 | CAPI send | `src/lib/meta/capi.ts` | Simulate mode: no token ⇒ marks sent locally | Real Conversions API POST + EMQ readout | **BLOCKED: needs META_ACCESS_TOKEN + per-client pixel mapping** | G8 |
+
+### G1 evidence (2026-10-29)
+- `tsc --noEmit` clean · `vitest` **100/100** (8 new: 5 fx-store + 6 cadence − 1 dedup) · `pnpm build` exit 0.
+- FX live path: `curl https://open.er-api.com/v6/latest/USD → rates.INR = 95.29615` (real network, no key).
+- Token audit: `.env` holds only `DATABASE_URL` + `DEMO_USER`; `META_ACCESS_TOKEN` **absent**, and the handoff carried placeholders (`<list>` / `<id>`), so the live pull + 3-ad spot-check remain BLOCKED until the real values land. Verify when they do: `pnpm meta:verify-token`, then `pnpm pull:once`.
 
 ## Webhooks / integrations (spec §6)
 
