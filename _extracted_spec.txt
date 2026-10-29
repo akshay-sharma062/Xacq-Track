@@ -1,0 +1,415 @@
+Xacqora Track: Product Requirements
+Oct 28, 2026 · @Arpit Sharma
+This tab is the summary for everyone. The developers build from the detailed tabs:
+A. Database schema: every table, column, index and retention rule
+B. Tracking script: how xt.js captures ad clicks and carries them to forms and checkouts
+C. API and webhooks: endpoints, processing pipeline, every platform adapter
+D. Meta integration: Meta app setup, spend pull, lead forms, CAPI payloads
+E. Screens and permissions: all 14 screens, user stories, permissions, notifications
+F. Metrics and attribution logic: every metric formula and the attribution algorithm
+G. Week by week build plan: 18 weekly task lists and AI working rules
+H. Testing and client onboarding: end-to-end tests, pilot accuracy checks, onboarding checklist
+1. Overview
+Xacqora Track is our own lead tracker and attribution CRM. It shows, for every lead, which ad brought them in, every ad they clicked after that, where they stand in the funnel right now, and whether they paid. It sends the real outcomes back to Meta so Meta finds more buyers, not just more form fillers.
+The problem today
+Leads sit in Google Sheets, Pabbly logs, TagMango, Aevent and WhatsApp. Nobody sees one lead's full story in one place.
+We match sales to ads by hand every week. It is slow and breaks when phone numbers or UTMs are messy.
+Meta only learns from the Lead event. It never hears who attended, who booked a call, or who paid.
+Clients ask "how are my leads doing" and we answer with screenshots and sheets.
+What Xacqora Track does
+Captures every click, form fill and Meta Instant Form lead with its exact campaign, ad set and ad.
+Joins every event about that person into one lead record, keyed on phone number.
+Shows the lead's live status: registered, attended, booked a call, paid, refunded.
+Pulls spend from all our Meta ad accounts and calculates cost and profit per campaign, ad set and ad.
+Sends qualified events back to Meta through the Conversions API.
+Gives each client a login to see their own leads and numbers.
+Who it is for
+Phase 1 to 3 is internal: Foremost Leads runs it on our own client accounts. Phase 4 adds the client portal. Selling it as SaaS to other coaches comes after we prove the data on 3 to 4 clients. Every design choice should still assume many clients (multi-tenant) from day one, so we do not rebuild later.
+Who builds it
+Our own team, using AI coding tools. Section 8 covers how.
+2. Decisions
+Confirmed by Arpit (28 Oct 2026)
+Decision
+Answer
+Brand
+A product under Xacqora. Working name: Xacqora Track
+Who it serves first
+Internal (Foremost Leads clients) first, SaaS later
+Who builds
+Our own team, using AI coding tools
+First version integrations
+Meta (Ads + Lead Forms + CAPI), TagMango, Aevent, Zoom, Razorpay, Cosmofeed, Cashfree, Pabbly, WhatsApp, FlexiFunnels, Calendly, Google Sheets import
+Still open, need Arpit's call
+☐ Final product name. Options: Xacqora Track, Xacqora Sutra, Xacqora Pulse. Check domain and trademark first.
+☐ Which 3 to 4 clients are the pilot accounts.
+☐ Who on the team owns the build day to day (product owner) and who is the lead developer.
+☐ Hosting budget per month for Phase 1.
+☐ Attribution default: last paid click, or first click, for client reports.
+☐ Whether sales reps of clients will log calls inside Xacqora Track, or only our team.
+3. What Meta lets us track (read this first)
+Meta never shares which ads a specific person saw. We can track every ad a lead clicked, not every ad they watched. Every screen, report and sales pitch must say "ads clicked", never "ads watched".
+We can get
+Per person?
+How
+Which ad they clicked to reach our page
+Yes
+Dynamic URL parameters ({{ad.id}}, {{adset.id}}, {{campaign.id}}) plus fbclid
+Every later ad click by the same person
+Yes
+Same visitor cookie or same phone number on a later form
+Which ad an Instant Form lead came from
+Yes
+Lead webhook returns ad_id, adset_id, campaign_id, form_id
+How many times they clicked our ads
+Yes
+Count of ad-click touchpoints on the lead
+How many times they saw an ad (impressions)
+No
+Only totals per ad: impressions, reach, frequency
+Video watch time of an ad
+No
+Only totals per ad: ThruPlays, 25/50/75/100% views
+Spend, CPM, CTR, CPL per ad
+Per ad only
+Marketing API, pulled daily
+What we send back to Meta (CAPI)
+Lead, Registered, Attended, Booked Call, Purchase, each with hashed phone and email, fbc, fbp, event time and value. Meta uses this to optimise and to report conversions per ad. We do not get person-level data back from Meta in return.
+4. Data model
+Everything hangs off one Lead per person per client. Every click, payment or webinar join is an Event on that lead's timeline. Phone number is the main key because in India WhatsApp, not email, is the real channel.
+Table
+What it holds
+Key fields
+Workspace
+Our agency (later: each SaaS customer)
+id, name, plan
+Client
+One coach or business we run ads for
+id, workspace_id, name, currency, timezone, offer price
+Funnel
+One funnel of a client (webinar, paid workshop, call booking, direct checkout)
+id, client_id, type, landing URLs, product IDs
+Visitor
+A browser we have seen, before we know who it is
+visitor_id (cookie), first_seen, last_seen, fbp
+Lead
+One real person for one client
+id, client_id, phone (E.164), email, name, city, owner, stage, first_touch_id, last_touch_id, created_at
+Touchpoint
+One arrival on our page or one Instant Form submit
+lead_id or visitor_id, utm_source, utm_medium, utm_campaign, utm_content, utm_term, campaign_id, adset_id, ad_id, fbclid, fbc, landing_url, referrer, device, ip, timestamp
+Event
+Anything that happened to the lead
+lead_id, type, source_platform, value, currency, raw_payload, timestamp, sent_to_meta
+Deal / Payment
+A sale or refund
+lead_id, product, amount, gateway, gateway_txn_id, status, paid_at
+Ad entities
+Meta campaigns, ad sets, ads, creatives
+meta_id, ad_account_id, name, status, creative thumbnail
+Spend
+Daily spend per ad
+ad_id, date, spend, impressions, reach, clicks, currency
+Task / Note / Call
+Sales follow-ups
+lead_id, user_id, type, due_at, outcome, notes
+User
+Our team and client logins
+id, role, client access list
+Event types (first version)
+ad_click, page_view, form_submit, meta_form_lead, registered, webinar_joined, webinar_left (with minutes watched), replay_watched, whatsapp_sent, whatsapp_replied, call_booked, call_done, checkout_started, payment_success, payment_failed, refund, stage_changed, note_added.
+Identity rules
+Normalise every phone to +91XXXXXXXXXX format before saving. Strip spaces, 0 and 91 prefixes.
+Match on phone first, then email (lowercase, trimmed).
+When a known visitor cookie fills a form, attach all earlier anonymous touchpoints of that visitor to the lead.
+Same phone, different client = different leads. Never merge across clients.
+Keep raw_payload of every incoming webhook for debugging and re-processing.
+5. Module requirements
+Ten modules. Each one is shippable on its own and listed in build order.
+5.1 Tracking script (xt.js)
+One line of JS pasted in the head of any landing page: Lovable, FlexiFunnels, TagMango pages, WordPress, custom.
+On load: read all UTMs, fbclid, campaign_id, adset_id, ad_id from the URL. Create or read a first-party visitor_id cookie (365 days). Create fbc from fbclid if missing. Read fbp.
+Send a touchpoint to our API on every landing.
+Auto-fill hidden fields in any form on the page (utm_*, ad_id, visitor_id, fbc, fbp) so they travel with the form submit.
+Append the same values to outgoing links and checkout buttons (TagMango, Cashfree, Razorpay pages) so attribution survives the redirect.
+Under 10 KB, no impact on page speed, works without our server being up (queue and retry).
+5.2 Meta Instant Form leads
+Connect a Facebook Page through Meta login. Subscribe to the leadgen webhook.
+On each lead: fetch the lead fields, ad_id, adset_id, campaign_id, form_id. Create or match the Lead.
+Field mapping screen per form (which question is phone, name, city, custom questions).
+5.3 Identity and lead record
+Apply the identity rules in Section 4.
+Duplicate review screen: show likely duplicates (same email, different phone) for a human to merge.
+5.4 Lead timeline (the main screen)
+Header: name, phone, email, client, current stage, owner, total paid.
+Source card: first ad clicked, last ad clicked, count of ad clicks, with the ad thumbnail and name.
+Timeline: every event, newest first, with platform icon and time in IST.
+Search by phone, email, name. Filters by client, funnel, stage, campaign, ad, date range.
+5.5 Pipeline and sales
+Stages per funnel, editable. Default for a webinar funnel: New, Registered, Attended, Hot, Call Booked, Paid, Lost.
+Stages move automatically from events (webinar_joined moves to Attended) and can be moved by hand.
+Lead assignment to reps: round robin or by rule. Tasks, notes, call outcomes, next follow-up date.
+Kanban view and list view. Bulk actions: assign, change stage, export CSV.
+5.6 Integrations hub
+One inbound webhook URL per client per platform, with a secret.
+Mapping screen: which field in the payload is phone, email, amount, product.
+Every webhook logged with status (processed, failed, duplicate) and a retry button.
+Full list and event mapping in Section 6.
+5.7 Meta Ads pull
+Connect multiple ad accounts per client through Meta Business login (system user token preferred).
+Every night and every 3 hours during the day: pull campaigns, ad sets, ads, creatives, and daily insights per ad (spend, impressions, reach, clicks, link clicks, ThruPlays).
+Store spend in billing currency and in INR, using a stored daily FX rate.
+5.8 Meta CAPI push
+Per client: choose which pixel/dataset gets which events.
+Send Lead, CompleteRegistration (registered), custom Attended, Schedule (call booked), Purchase with value.
+Include hashed phone (SHA-256, E.164 without +), hashed email, fbc, fbp, client IP, user agent, event_id for dedup with the browser pixel.
+Retry queue. Show Event Match Quality and send status per event.
+Rule: never send an event twice. Never send Purchase for a refunded payment; send a refund note in our records instead.
+5.9 Reports
+Covered in Section 7.
+5.10 Client portal and admin
+Client login sees only their own leads, funnels and reports. Read-only by default.
+Our roles: Owner, Admin, Media Buyer, Sales Rep, Viewer.
+Phone numbers masked for roles that do not need them (show last 4 digits).
+Audit log of who viewed, exported or changed what.
+6. Integrations (first version)
+Every platform below must land its events on the right lead within 1 minute. Where a platform has no direct webhook, route it through Pabbly first and replace with a direct connection later. The developer confirms each platform's current webhook and API options in week 1 before building.
+Platform
+What it gives us
+Events created
+Match key
+Connection
+Meta Lead Forms
+Instant Form leads with ad IDs
+meta_form_lead
+phone, email
+Meta webhook (leadgen)
+Meta Marketing API
+Campaigns, ad sets, ads, creatives, daily spend
+none (spend tables)
+ad_id
+API pull, scheduled
+Meta CAPI
+Outbound only
+sends Lead, Registered, Attended, Call Booked, Purchase
+hashed phone, email, fbc
+API push
+xt.js tracking script
+Ad clicks, page views, form fills
+ad_click, page_view, form_submit
+visitor_id, then phone
+Our own API
+FlexiFunnels
+Opt-ins and orders on FlexiFunnels pages
+registered, payment_success
+phone, email
+Form webhook, CAPI links
+TagMango
+Course and workshop purchases
+checkout_started, payment_success, refund
+phone, email
+Webhook (or Pabbly)
+Razorpay
+Payments
+payment_success, payment_failed, refund
+phone, email in notes
+Webhook
+Cashfree
+Payments
+payment_success, payment_failed, refund
+phone, email
+Webhook
+Cosmofeed
+Purchases
+payment_success
+phone, email
+Webhook (or Pabbly)
+Aevent
+Webinar registration, attendance, watch time
+registered, webinar_joined, webinar_left, replay_watched
+phone, email
+Webhook action per campaign
+Zoom
+Webinar registration and attendance
+registered, webinar_joined, webinar_left
+email
+Zoom app webhook / report API
+Calendly
+Booked and cancelled calls
+call_booked, call_cancelled
+email, phone question
+Webhook
+Pabbly Connect
+Anything else, plus WhatsApp flows
+whatsapp_sent, whatsapp_replied, any custom
+phone
+Our webhook as a Pabbly action
+WhatsApp (via WATI, Interakt, AiSensy or Periskope)
+Messages sent and replies
+whatsapp_sent, whatsapp_replied
+phone
+Provider webhook or Pabbly
+Google Sheets / CSV
+Old leads and sales
+backfill of all types
+phone, email
+Upload with column mapping
+Rules for every integration
+Pass UTMs and visitor_id through to the checkout or form wherever the platform allows custom fields, so the sale carries its own attribution.
+Use the gateway transaction ID to stop the same payment being counted twice.
+A payment with no matching lead creates a new lead marked "source unknown". It still counts in revenue.
+Every platform has a test button that sends a fake event and shows where it landed.
+7. Attribution rules and reports
+Every sale gets credited to one ad by a fixed rule, and every report states which rule it used. Default is last paid click within 30 days, because webinar buyers often pay 1 to 3 weeks after the first click.
+Attribution models (selectable per report)
+Model
+Credit goes to
+Use for
+Last paid click (default)
+Last Meta ad clicked before the sale, within 30 days
+Day to day buying decisions
+First click
+The ad that first brought the person in
+Judging which ads find new people
+Linear
+Split equally across all ads clicked
+Long journeys with many retargeting clicks
+Lead source
+The ad on the lead's first form fill
+Matching what our current weekly sheet does
+Window is editable per client (7, 14, 30, 60 days). Sales with no ad click in the window go to "Organic / unknown".
+Reports in the first version
+Funnel report per client: ad spend, leads, registrations, attended, calls booked, sales, revenue. Cost per lead, per registrant, per attendee, per call, per sale. Show-up rate and close rate.
+Ad performance table: campaign, ad set, ad rows with spend, leads, sales, revenue, ROAS, profit. Drill down from campaign to ad. Ad thumbnail on every row.
+Wasted spend: ads above a set spend with zero sales, sorted by spend.
+New vs old leads: sales from leads created inside the date range vs older leads.
+Meta vs Xacqora Track: Meta-reported conversions next to our counted conversions per ad, so we see where Meta over or under reports.
+Lead source mix: Instant Form vs landing page vs organic vs unknown.
+Weekly client summary: one page, auto-generated every Monday 9 AM IST, sent to the client portal and as a PDF.
+Every report can export CSV and Excel. Every number links to the list of leads behind it. Revenue counts net of refunds.
+8. Tech stack and building with AI
+Use boring, well-documented tools so AI coding assistants write correct code on the first try. Everything below is a recommendation; the lead developer can swap a piece if they have a strong reason and write it down.
+
+system architecture · 4 sources in, 3 outputs
+All incoming data goes through one ingest API and a queue, so a slow platform or a spike of 5,000 webinar joins never drops events.
+Layer
+Recommended
+Why
+App framework
+Next.js (TypeScript)
+One codebase for team app, client portal and API routes
+Database
+PostgreSQL (Supabase or Neon)
+Relational data, row-level security per client
+Queue and jobs
+Inngest, Trigger.dev or BullMQ + Redis
+Webhook processing, retries, scheduled Meta pulls
+Tracking script
+Plain TypeScript, bundled small
+Runs on every landing page, must be tiny
+Auth
+Supabase Auth or Clerk
+Team and client logins, roles
+Hosting
+Vercel for app, managed Postgres in Mumbai region
+Low latency for India, data stays in India
+Charts
+Recharts or Tremor
+Fast to build report screens
+Error tracking
+Sentry
+Catch failed webhooks early
+How the team builds with AI
+This doc is the source of truth. Paste the relevant section into the AI tool for each task.
+One small task per AI session: one table, one webhook handler, one screen. Never "build the whole CRM".
+Database schema first (Section 4), reviewed by a human before any screen is built.
+Every webhook handler gets a saved sample payload and a test that replays it.
+A human reviews every pull request touching money, phone numbers, CAPI or permissions.
+Keep a CHANGELOG and a short README per module so the next AI session has context.
+Never paste real client lead data or access tokens into an AI chat. Use fake data.
+9. Roadmap and acceptance criteria
+About 18 weeks to a working client portal, assuming 2 developers using AI tools part of their week on this. These are estimates; the lead developer revises them after week 2. No phase starts until the gate before it passes on the pilot clients.
+
+roadmap · 4 phases, 4 gates
+Phase 1: Capture and lead record (weeks 1 to 6)
+Build: database schema, xt.js script, ingest API and queue, Meta Lead Form webhook, identity rules, lead list and lead timeline screens, CSV import of old leads.
+☐ xt.js live on all pilot landing pages, under 10 KB
+☐ Every Meta ad URL on pilot accounts uses dynamic campaign, ad set and ad ID parameters
+☐ 100% of pilot Instant Form leads land within 1 minute with ad_id
+☐ At least 95% of landing page leads carry an ad_id or a UTM
+☐ Same person filling two forms shows as one lead with both touchpoints
+Phase 2: Status and pipeline (weeks 7 to 10)
+Build: integrations hub, webhooks for Aevent, Zoom, TagMango, Razorpay, Cashfree, Cosmofeed, FlexiFunnels, Calendly, Pabbly and WhatsApp provider. Stages, auto stage moves, assignment, tasks, notes.
+☐ A test lead moves from Registered to Attended to Paid on its own, using real webhooks
+☐ Webhook log shows zero unprocessed events older than 10 minutes
+☐ Pilot sales team updates leads here instead of the sheet for 2 straight weeks
+Phase 3: Meta loop and reports (weeks 11 to 14)
+Build: Meta ad account connection, scheduled spend pull, CAPI push with dedup, attribution models, funnel report, ad performance table, wasted spend, Meta vs Xacqora Track report.
+☐ Total revenue in Xacqora Track matches gateway dashboards within 2% for the pilot month
+☐ Spend per account matches Meta Ads Manager within 1%
+☐ CAPI Event Match Quality is 7 or higher on Purchase events
+☐ Weekly attribution report for a pilot client takes under 5 minutes instead of a day
+Phase 4: Client portal (weeks 15 to 18)
+Build: client logins, permissions, masked phone numbers, weekly auto summary, exports, audit log.
+☐ A pilot client logs in and sees only their own data
+☐ Monday 9 AM IST summary reaches every pilot client without manual work
+☐ Security checklist in Section 10 is signed off
+After Phase 4 (not in scope now)
+SaaS signup and billing, Google and YouTube ads, multi-touch beyond linear, AI lead scoring, in-app WhatsApp inbox.
+10. Security, privacy and compliance
+We will hold phone numbers and payment records of lakhs of people for many clients, so one leak hurts every client at once. These rules are not optional in any phase.
+Security checklist
+☐ Row-level security: every query is filtered by client_id at the database level, not only in the app code
+☐ Meta tokens, gateway secrets and webhook secrets stored encrypted, never in code or in the frontend
+☐ Every inbound webhook verified by signature or secret before processing
+☐ 2-factor login for all Foremost Leads users
+☐ Phone and email masked for roles that do not need them; exports logged in the audit log
+☐ Daily database backups, restore tested once a month
+☐ Rate limits on the public ingest API so a bad actor cannot flood it
+Privacy and law
+India's Digital Personal Data Protection Act applies. The legal or compliance owner confirms consent wording and data retention rules before the pilot goes live.
+Each client's landing page and lead form carries a privacy notice and consent line that covers tracking and sharing with Meta.
+Phone and email are hashed with SHA-256 before sending to Meta. Raw values never leave our servers.
+A client can ask us to delete a lead; deletion removes it from our database and stops any future CAPI events for that person.
+Meta platform terms: we only use Meta data for the ad account owner's own reporting. Meta Lead Form data is never shared between clients.
+11. Team, success metrics and risks
+Roles (names to be filled by Arpit)
+Role
+Owns
+Name
+Product owner
+This doc, priorities, sign-off on each gate
+
+Lead developer
+Architecture, database, code review, AI tool workflow
+
+Developer
+Integrations, webhooks, screens
+
+Media buyer (pilot)
+Dynamic URL parameters on ads, checks Meta vs Xacqora Track numbers
+
+Sales/ops (pilot)
+Uses the pipeline daily, reports bugs
+
+How we know it works
+Weekly attribution report time drops from about a day per client to under 5 minutes.
+95% or more of sales are tied to a specific ad.
+Revenue in Xacqora Track matches payment gateways within 2%.
+Pilot clients' cost per sale improves after 4 weeks of CAPI Purchase events (compare against the 4 weeks before).
+No pilot client asks us for a manual sheet again.
+Risks and what we do about them
+Risk
+What we do
+A platform drops UTMs on redirect to checkout
+Match on phone and email; push UTMs into custom fields where allowed
+Meta API changes or rate limits
+Use official SDK, pull in batches, alert on failures
+Messy phone numbers break matching
+Strict normalisation, duplicate review screen
+AI-written code with hidden bugs in money or permissions
+Human review on those files, tests with real sample payloads
+Scope creep into a full CRM too early
+Anything not in Sections 5 and 6 goes to an "after Phase 4" list
+Team bandwidth shared with client work
+Fixed weekly hours for this build, protected by the product owner
+Replaces: the UTM report generator project. Its logic (campaign name cleanup, new vs old leads, proportional spend split) moves into the reports module of Phase 3.

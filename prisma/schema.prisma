@@ -1,0 +1,595 @@
+// Xacqora Track — data model (spec section 4 + directive tables).
+//
+// Provider strategy:
+//   - Local demo runs on SQLite so `pnpm dev` works with zero services.
+//   - Production targets Postgres/Supabase (Mumbai region — data stays in India).
+//   - The models below are PROVIDER-AGNOSTIC: no Prisma enums, no Json field
+//     type, no `@db.*` native types. JSON-ish payloads are String blobs and are
+//     parsed in the app layer. To go to Postgres, flip `provider = "sqlite"` to
+//     `provider = "postgresql"` in the datasource and run `pnpm db:migrate`.
+//
+// Every money/phone/CAPI/permission write path scopes by `clientId` at the
+// query layer; in Postgres this is backed by Row-Level Security policies
+// (see docs/rls.md + SECURITY_CHECKLIST.md).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite" // flip to "postgresql" for prod
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Tenancy
+// ---------------------------------------------------------------------------
+model Workspace {
+  id    String @id @default(cuid()) // spec: "Our agency (later: each SaaS customer)"
+  name  String
+  plan  String @default("internal") // internal | saas | trial
+  createdAt DateTime @default(now())
+
+  clients  Client[]
+  users    User[]
+}
+
+model Client {
+  id          String   @id @default(cuid()) // one coach/business we run ads for
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id])
+
+  name         String
+  currency     String  @default("INR")
+  timezone     String  @default("Asia/Kolkata")
+  offerPrice   Int    @default(0) // INR, used for profit math in reports
+
+  // Attribution default window (spec 7: 7/14/30/60 days, editable per client).
+  attributionWindowDays Int @default(30)
+  attributionModel      String @default("last_paid_click") // last_paid_click|first_click|linear|lead_source
+
+  // Webhook shared secret (encrypted in prod; plaintext here is fake fixtures only).
+  webhookSecret String?
+
+  // Meta
+  metaPageId    String?
+  metaPixelId   String? // CAPI dataset / pixel for this client (spec 5.8)
+  capiEventType String? @default("default")
+
+  funnels      Funnel[]
+  visitors     Visitor[]
+  leads        Lead[]
+  adAccounts   AdAccount[]
+  webhookLogs  WebhookLog[]
+  capiEvents   OutboundEvent[]
+  auditLogs    AuditLog[]
+  metaForms    MetaLeadForm[]
+  attributionRules AttributionRule[]
+  reportConfigs ReportConfig[]
+  touchpoints  Touchpoint[]
+  events       Event[]
+  payments     Payment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([workspaceId])
+}
+
+// ---------------------------------------------------------------------------
+// Funnels
+// ---------------------------------------------------------------------------
+model Funnel {
+  id        String @id @default(cuid())
+  clientId  String
+  client    Client @relation(fields: [clientId], references: [id])
+  type      String // webinar | paid_workshop | call_booking | direct_checkout
+  name      String
+  landingUrls String // JSON array, e.g. '["https://…/w1"]'
+  productIds  String // JSON array
+  stages      String // JSON array of stage names; default webinar: New,Registered,Attended,Hot,Call Booked,Paid,Lost
+  default     Boolean @default(false)
+
+  leads Lead[]
+
+  @@index([clientId])
+}
+
+// ---------------------------------------------------------------------------
+// Visitors (browser before we know who it is — spec: cookie/fbp)
+// ---------------------------------------------------------------------------
+model Visitor {
+  visitorId String  @id // the cookie value (v_…) — natural key
+  clientId  String?
+  client    Client? @relation(fields: [clientId], references: [id])
+  fbp       String? // Meta browser id
+  fbc       String? // fb.<fbclid>
+  firstSeen DateTime @default(now())
+  lastSeen  DateTime @updatedAt
+
+  touchpoints Touchpoint[]
+
+  @@index([clientId])
+  @@index([fbp])
+}
+
+// ---------------------------------------------------------------------------
+// Lead — one real person for one client. PHONE IS THE MAIN KEY (spec 4).
+// Same phone + different client = different lead; NEVER merge across clients.
+// ---------------------------------------------------------------------------
+model Lead {
+  id          String @id @default(cuid())
+  clientId    String
+  client      Client @relation(fields: [clientId], references: [id])
+  funnelId    String?
+  funnel      Funnel? @relation(fields: [funnelId], references: [id])
+
+  // Identity
+  phone           String? // E.164 (+91…) — the join key
+  phoneNormalized String? // for matching; set by identity.ts
+  email           String?
+  emailNormalized String? // lowercase/trim
+  name            String?
+  city            String?
+  sourceUnknown   Boolean @default(false) // payment with no matching lead (spec 6)
+
+  // Pipeline
+  stage   String @default("New")
+  ownerId String? // rep User id
+  owner   User?   @relation(fields: [ownerId], references: [id])
+
+  // Identity linkage to anonymous visitor (spec 4: attach earlier touchpoints)
+  visitorId String?
+
+  // Meta browser identity carried from the visitor cookie / first touch (spec 3).
+  // Used to build CAPI `fbc`/`fbp` payloads without re-querying touchpoints.
+  fbc String?
+  fbp String?
+
+  // Attribution bookkeeping (spec 4: first/last touch) — keep the ids; the
+  // touchpoints are reached via `touchpoints` (Lead.touchpoints).
+  firstTouchId String?
+  lastTouchId  String?
+
+  // Lifecycle
+  isDuplicateCandidate Boolean @default(false)
+  deletedAt           DateTime? // soft-delete; stops future CAPI (spec 10)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  touchpoints    Touchpoint[]
+  events         Event[]
+  payments       Payment[]
+  outboundEvents OutboundEvent[]
+  tasks          Task[]
+  notes          Note[]
+  calls          Call[]
+
+  @@index([clientId])
+  @@index([phoneNormalized, clientId])
+  @@index([emailNormalized, clientId])
+  @@index([stage, clientId])
+  @@index([ownerId])
+  @@index([visitorId])
+}
+
+// ---------------------------------------------------------------------------
+// Touchpoint — one arrival or one Instant Form submit (spec 4).
+// ---------------------------------------------------------------------------
+model Touchpoint {
+  id     String @id @default(cuid())
+
+  // Exactly one of leadId / visitorId is set until identity is known.
+  leadId    String?
+  lead      Lead?   @relation(fields: [leadId], references: [id])
+  visitorId String?
+  visitor   Visitor? @relation(fields: [visitorId], references: [visitorId])
+
+  clientId  String
+  client    Client @relation(fields: [clientId], references: [id])
+
+  // UTM
+  utmSource   String?
+  utmMedium   String?
+  utmCampaign String?
+  utmContent  String?
+  utmTerm     String?
+
+  // Meta ad attribution
+  campaignId String?
+  adsetId    String?
+  adId       String?
+  fbclid     String?
+  fbc        String?
+  fbp        String?
+
+  landingUrl String?
+  referrer   String?
+  device     String? // "UA|lang|WxH"
+  ip         String? // server-filled; never trust client (spec security)
+  kind       String @default("page_view") // page_view | form_submit | meta_form_lead
+
+  timestamp   DateTime @default(now())
+
+  // Denormalised ad identity, resolved at ingest if the ad is known (avoids joins).
+  ad        Ad?  @relation(fields: [adRefId], references: [metaId])
+  adRefId   String?
+
+  @@index([visitorId])
+  @@index([leadId])
+  @@index([clientId])
+  @@index([adRefId])
+  @@index([timestamp])
+}
+
+// ---------------------------------------------------------------------------
+// Event — anything that happened to the lead (spec 4: the timeline).
+// type ∈ ad_click, page_view, form_submit, meta_form_lead, registered,
+//   webinar_joined, webinar_left, replay_watched, whatsapp_sent,
+//   whatsapp_replied, call_booked, call_done, checkout_started,
+//   payment_success, payment_failed, refund, stage_changed, note_added
+// ---------------------------------------------------------------------------
+model Event {
+  id      String @id @default(cuid())
+  leadId  String
+  lead    Lead   @relation(fields: [leadId], references: [id])
+  clientId String
+  client   Client @relation(fields: [clientId], references: [id])
+
+  type          String
+  sourcePlatform String // meta | aevent | zoom | razorpay | tagmango | cashfree | cosmofeed | flexifunnels | calendly | pabbly | whatsapp | xt | sheets | manual
+  value         Float?  // monetary events
+  currency      String? @default("INR")
+  minutesWatched Float? // webinar_left / replay_watched
+  webhookLogId  String? // provenance link
+  webhookLog    WebhookLog? @relation(fields: [webhookLogId], references: [id])
+  eventId       String? // CAPI dedup id
+  rawPayload    String  // JSON — always kept for re-processing (spec 4)
+
+  sentToMeta Boolean @default(false)
+
+  timestamp  DateTime @default(now())
+
+  @@index([leadId])
+  @@index([clientId])
+  @@index([type])
+  @@index([timestamp])
+  @@index([webhookLogId])
+}
+
+// ---------------------------------------------------------------------------
+// Payment (Deal) — a sale or refund (spec 4). Dedup by gateway txn id.
+// status: pending | paid | failed | refunded
+// ---------------------------------------------------------------------------
+model Payment {
+  id            String @id @default(cuid())
+  leadId        String
+  lead          Lead  @relation(fields: [leadId], references: [id])
+  clientId      String
+  client        Client @relation(fields: [clientId], references: [id])
+
+  product        String?
+  amount         Int // in client currency, minor units? We keep major (INR) here.
+  currency       String @default("INR")
+  gateway        String // razorpay | cashfree | cosmo | tagmango | flexifunnels | unknown
+  gatewayTxnId   String // idempotency key (spec 6: stop double counting)
+  status         String @default("pending") // pending|paid|failed|refunded
+  paidAt         DateTime?
+  refundedAt     DateTime?
+  refundEventId  String?
+
+  @@unique([gateway, gatewayTxnId]) // hard dedup at DB level
+  @@index([leadId])
+  @@index([clientId])
+  @@index([status])
+}
+
+// ---------------------------------------------------------------------------
+// Ad entities (Meta). Pulled by the scheduled Marketing API job.
+// ---------------------------------------------------------------------------
+model AdAccount {
+  id       String @id @default(cuid())
+  metaId   String @unique // the ad account number
+  clientId String
+  client   Client @relation(fields: [clientId], references: [id])
+  name     String
+  currency String @default("USD") // ad accounts often report in USD; we store INR too
+
+  campaigns AdCampaign[]
+  adsets    AdSet[]
+  ads       Ad[]
+  spend     Spend[]
+
+  lastPulledAt DateTime?
+}
+
+model AdCampaign {
+  metaId     String @id // e.g. "123_456"
+  adAccountId String
+  adAccount  AdAccount @relation(fields: [adAccountId], references: [id])
+  clientId   String
+  name       String
+  status     String @default("ACTIVE")
+
+  adsets AdSet[]
+
+  @@index([clientId])
+}
+
+model AdSet {
+  metaId     String @id // "123_456-789"
+  adAccountId String
+  adAccount  AdAccount @relation(fields: [adAccountId], references: [id])
+  campaignMetaId String
+  campaign AdCampaign @relation(fields: [campaignMetaId], references: [metaId])
+  clientId String
+  name       String
+  status     String @default("ACTIVE")
+
+  ads Ad[]
+
+  @@index([clientId])
+}
+
+model Ad {
+  metaId   String @id // "123_…_abcd"
+  adAccountId String
+  adAccount  AdAccount @relation(fields: [adAccountId], references: [id])
+  adSetMetaId  String
+  adSet    AdSet @relation(fields: [adSetMetaId], references: [metaId])
+  clientId String
+  name     String
+  status   String @default("ACTIVE")
+
+  creatives Creative[]
+  touchpoints Touchpoint[]
+  spend     Spend[]
+
+  @@index([clientId])
+}
+
+model Creative {
+  id           String @id @default(cuid())
+  adMetaId     String
+  ad           Ad @relation(fields: [adMetaId], references: [metaId])
+  type         String // IMAGE | VIDEO | CAROUSEL
+  thumbnailUrl String? // used in reports (spec: thumbnail on every row)
+  url          String?
+}
+
+// ---------------------------------------------------------------------------
+// Spend — daily per-ad (spec 5.7). Stored in ad-account currency AND INR.
+// ---------------------------------------------------------------------------
+model Spend {
+  id        String @id @default(cuid())
+  adMetaId  String
+  ad        Ad @relation(fields: [adMetaId], references: [metaId])
+  adAccountId String
+  adAccount AdAccount @relation(fields: [adAccountId], references: [id])
+  clientId  String
+  day       String // "YYYY-MM-DD" (UTC or client tz; we fix on pull)
+
+  spend       Float // native currency
+  impressions Float
+  reach       Float
+  clicks      Float
+  linkClicks  Float
+  thruPlays   Float // video
+
+  currency  String @default("USD")
+  inrRate   Float @default(0) // FX at pull time (spec 5.7: daily FX rate)
+  inrSpend  Float @default(0) // spend * inrRate (spec: store in INR too)
+
+  // Meta-reported conversions for that ad+day (from the daily pull). Used by
+  // the "Meta vs Xacqora Track" report (spec 7) so we can see where Meta
+  // over/under-reports against what our own records counted.
+  metaConversions Float @default(0)
+
+  @@unique([adMetaId, day])
+  @@index([adMetaId])
+  @@index([day])
+  @@index([clientId])
+}
+
+// ---------------------------------------------------------------------------
+// Sales follow-ups (spec 4: Task/Note/Call)
+// ---------------------------------------------------------------------------
+model Task {
+  id      String @id @default(cuid())
+  leadId  String
+  lead    Lead @relation(fields: [leadId], references: [id])
+  userId  String
+  user    User @relation(fields: [userId], references: [id])
+  type    String // call | whatsapp | email | followup
+  dueAt   DateTime?
+  outcome String?
+  notes   String?
+  createdAt DateTime @default(now())
+
+  @@index([leadId])
+}
+
+model Note {
+  id      String @id @default(cuid())
+  leadId  String
+  lead    Lead @relation(fields: [leadId], references: [id])
+  userId  String
+  user    User @relation(fields: [userId], references: [id])
+  body    String
+  createdAt DateTime @default(now())
+
+  @@index([leadId])
+}
+
+model Call {
+  id         String @id @default(cuid())
+  leadId     String
+  lead       Lead @relation(fields: [leadId], references: [id])
+  userId     String
+  user       User @relation(fields: [userId], references: [id])
+  bookedAt   DateTime
+  doneAt     DateTime?
+  outcome    String? // won | lost | not_reached
+  notes      String?
+
+  @@index([leadId])
+}
+
+// ---------------------------------------------------------------------------
+// Users / roles (spec 5.10). role ∈ owner|admin|media_buyer|sales_rep|viewer.
+// clientAccess: JSON array of client ids this user can see.
+// ---------------------------------------------------------------------------
+model User {
+  id          String @id @default(cuid())
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id])
+  email       String @unique
+  name        String
+  role        String @default("viewer")
+  clientAccess String // JSON array of client ids; empty = all in workspace
+  phoneMask   Boolean @default(true) // if true, this role only sees last-4
+  twoFactor   Boolean @default(false)
+
+  leads     Lead[]
+  tasks     Task[]
+  notes     Note[]
+  calls     Call[]
+  auditLogs AuditLog[]
+
+  createdAt DateTime @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// Webhook plumbing (spec 5.6): every inbound logged, status + retry.
+// status ∈ received | processed | failed | duplicate
+// ---------------------------------------------------------------------------
+model WebhookLog {
+  id        String @id @default(cuid())
+  clientId  String
+  client    Client @relation(fields: [clientId], references: [id])
+  platform  String // meta | razorpay | … (sourcePlatform union)
+  secret    String? // which secret verified this (or "none")
+  status    String @default("received")
+  rawPayload String
+  eventId   String? // upstream id, for dedup
+  error     String?
+  retryCount Int @default(0)
+  receivedAt DateTime @default(now())
+  processedAt DateTime?
+
+  events Event[]
+
+  @@index([clientId])
+  @@index([platform])
+  @@index([status])
+  @@index([receivedAt])
+}
+
+// ---------------------------------------------------------------------------
+// Outbound CAPI events (spec 5.8). event_id idempotency; never send twice.
+// matchQuality: Meta's Event Match Quality (0–10). status: queued|sent|failed.
+// ---------------------------------------------------------------------------
+model OutboundEvent {
+  id        String @id @default(cuid())
+  clientId  String
+  client    Client @relation(fields: [clientId], references: [id])
+  leadId    String?
+  lead      Lead?  @relation(fields: [leadId], references: [id])
+  type      String // Lead | CompleteRegistration | Attended | Schedule | Purchase | Refund
+  value     Float?
+  currency  String? @default("INR")
+  fbc       String?
+  fbp       String?
+  hashedPhone  String // SHA-256 of E.164 without "+"
+  hashedEmail  String? // SHA-256 of lowercased email
+  clientIp     String?
+  userAgent    String?
+  eventTime    DateTime
+  eventId      String @unique // idempotency key
+  dedupKey     String @unique // e.g. "purchase:<gatewayTxnId>" — one CAPI per event kind
+  sentToMeta   Boolean @default(false)
+  status      String @default("queued") // queued | sent | failed | skipped
+  matchQuality Int?
+  error       String?
+  createdAt   DateTime @default(now())
+  sentAt      DateTime?
+
+  @@index([clientId])
+  @@index([status])
+  @@index([dedupKey])
+}
+
+// ---------------------------------------------------------------------------
+// Audit log (spec 5.10 / 10): who viewed/exported/changed what.
+// ---------------------------------------------------------------------------
+model AuditLog {
+  id      String @id @default(cuid())
+  clientId String
+  client  Client @relation(fields: [clientId], references: [id])
+  userId  String
+  user    User @relation(fields: [userId], references: [id])
+  action  String // view | export | create | update | delete | login | merge | assign | stage_change
+  entity  String
+  entityId String
+  details String // JSON
+  at      DateTime @default(now())
+
+  @@index([clientId])
+  @@index([userId])
+  @@index([at])
+}
+
+// ---------------------------------------------------------------------------
+// Meta Instant Form plumbing (spec 5.2): form + per-question field mapping.
+// ---------------------------------------------------------------------------
+model MetaLeadForm {
+  id      String @id @default(cuid())
+  clientId String
+  client  Client @relation(fields: [clientId], references: [id])
+  formId  String // Meta lead form id
+  pageId  String?
+  name    String
+  subscribed Boolean @default(false)
+  fieldsMapping String // JSON: questionLabel -> {field, type}
+
+  mappings FormFieldMapping[]
+
+  @@index([clientId])
+}
+
+model FormFieldMapping {
+  id      String @id @default(cuid())
+  metaLeadFormId String
+  metaLeadForm  MetaLeadForm @relation(fields: [metaLeadFormId], references: [id])
+  questionId String
+  mapsTo   String // phone | email | name | city | custom
+  customKey String?
+
+  @@index([metaLeadFormId])
+}
+
+// ---------------------------------------------------------------------------
+// Attribution + report config (spec 7): per-client overrides of the model/window.
+// ---------------------------------------------------------------------------
+model AttributionRule {
+  id      String @id @default(cuid())
+  clientId String
+  client  Client @relation(fields: [clientId], references: [id])
+  model   String // last_paid_click | first_click | linear | lead_source
+  windowDays Int
+  scope   String @default("report") // report override; client default lives on Client
+  createdAt DateTime @default(now())
+
+  @@index([clientId])
+}
+
+model ReportConfig {
+  id      String @id @default(cuid())
+  clientId String
+  client  Client @relation(fields: [clientId], references: [id])
+  key     String // funnel | ad_perf | wasted_spend | new_vs_old | meta_vs_track | source_mix | weekly
+  value   String // JSON config (filters, thresholds)
+  createdAt DateTime @default(now())
+
+  @@index([clientId])
+}

@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Xacqora Track — demo landing page</title>
+    <!-- Spec 5.1: the tracking script. data-client = the tenant this page is for. -->
+    <script src="/xt.js" data-client="c_demo" data-api="" defer></script>
+    <style>
+      body { font-family: system-ui, sans-serif; max-width: 640px; margin: 2rem auto; color: #111; }
+      .card { border: 1px solid #ddd; border-radius: 8px; padding: 1rem; margin: 1rem 0; }
+      button, input { font-size: 1rem; padding: .5rem; }
+      .hint { color: #666; font-size: .85rem; }
+      #log { background:#0b0b0b; color:#7CFC00; font-family: monospace; font-size:.75rem;
+             padding:.6rem; border-radius:6px; white-space:pre-wrap; height:120px; overflow:auto;}
+    </style>
+  </head>
+  <body>
+    <h1>Demo landing page</h1>
+    <p class="hint">
+      This page loads <code>/xt.js</code>. Visit it with URL params to see attribution captured:
+    </p>
+    <p class="hint">
+      e.g. <code>/?utm_source=fb&amp;utm_medium=ads&amp;utm_campaign=w1&amp;ad_id=482&amp;fbclid=abc</code>
+    </p>
+
+    <div class="card">
+      <h2>Leads capture form</h2>
+      <p class="hint">Fill this and hidden attribution fields are auto-appended to the form data.</p>
+      <form id="lead" action="/api/webhooks/ingest" method="post" style="display:flex;flex-direction:column;gap:.5rem">
+        <input name="name" placeholder="Name" />
+        <input name="phone" placeholder="Phone (e.g. 98765 43210)" />
+        <input name="email" placeholder="Email" />
+        <button type="submit">Submit</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>Outgoing link (attribution carried through)</h2>
+      <a id="checkout" href="/demo/checkout" data-xacqora="on">Go to checkout</a>
+      <p class="hint">Click it — the browser URL will carry visitor_id/ad_id/fbc forward.</p>
+    </div>
+
+    <div class="card">
+      <h2>Captured touchpoint (localStorage preview)</h2>
+      <p class="hint">The last queued touchpoint your script stored:</p>
+      <pre id="log">loading…</pre>
+    </div>
+
+    <script>
+      // A little live preview of what xt.js put in the queue (demo only).
+      (function () {
+        const el = document.getElementById("log");
+        const render = () => {
+          try {
+            const q = JSON.parse(localStorage.getItem("xacqora_touch_queue") || "[]");
+            const form = document.getElementById("lead");
+            const vals = {};
+            new FormData(form).forEach((v, k) => (vals[k] = v));
+            el.textContent =
+              "queue length: " + q.length + "\n" +
+              "auto-filled hidden form fields:\n" +
+              JSON.stringify(vals, null, 2);
+          } catch (e) { el.textContent = String(e); }
+        };
+        setInterval(render, 800);
+      })();
+    </script>
+  </body>
+</html>
