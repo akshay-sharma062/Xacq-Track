@@ -23,6 +23,9 @@ export interface PulledAd {
   adId: string;
   adsetId: string;
   campaignId: string;
+  /** human names (for the DB create paths); optional so the simulate path stays lean */
+  adsetName?: string | null;
+  campaignName?: string | null;
   name: string;
   status: string;
   creative?: { type: string; thumbnailUrl?: string | null; url?: string | null };
@@ -98,15 +101,15 @@ export async function upsertPulled(
 
     await prisma.adCampaign.upsert({
       where: { metaId: a.campaignId },
-      update: { status: a.status },
-      create: { metaId: a.campaignId, adAccountId: accountId, clientId, name: `Campaign ${a.campaignId}`, status: a.status },
+      update: { status: a.status, ...(a.campaignName ? { name: a.campaignName } : {}) },
+      create: { metaId: a.campaignId, adAccountId: accountId, clientId, name: a.campaignName ?? `Campaign ${a.campaignId}`, status: a.status },
     });
     await prisma.adSet.upsert({
       where: { metaId: a.adsetId },
-      update: {},
+      update: { ...(a.adsetName ? { name: a.adsetName } : {}) },
       create: {
         metaId: a.adsetId, adAccountId: accountId, campaignMetaId: a.campaignId,
-        clientId, name: `Ad set ${a.adsetId}`, status: a.status,
+        clientId, name: a.adsetName ?? `Ad set ${a.adsetId}`, status: a.status,
       },
     });
     await prisma.ad.upsert({
@@ -178,12 +181,30 @@ export async function upsertPulled(
 // ---------------------------------------------------------------------------
 
 /**
- * The daily-insights metrics we store (spec 5.7). `spend` is in the ad
- * account's billing currency; the rest are counts. `metaConversions` is the
- * "Meta-reported conversions" proxy used by the Meta-vs-Track report: Meta's
- * lead + purchase conversion fields, summed per ad per day.
+ * Verified-per-ad insights fields (G1 live verification, 2026-10-29, account
+ * act_…2164, API v23.0). Findings from the live probes that shaped this:
+ *   - `time_range` in ANY form 400s ("must be non-empty") on this account,
+ *     but the NO-range call returns Meta's default 30-day rollup
+ *     [date_start, date_stop] — one row per ad. `day` is stored as date_stop.
+ *   - `link_clicks`, `leads`, `purchases`, `video_plays_15_sec` are NOT
+ *     valid insights fields on this API version → `clicks` proxies
+ *     linkClicks and ThruPlays is stored 0 (documented proxy, not a guess).
+ *   - `results` (list of Meta-reported conversion indicators) is valid and
+ *     powers `metaConversions` for the Meta-vs-Track report.
+ *   - `spend` is in the account's billing currency (INR here, not USD).
  */
-const INSIGHT_FIELDS = "spend,impressions,reach,clicks,link_clicks,video_play_thru_play_15s,leads,purchases";
+const INSIGHT_FIELDS = "date_start,date_stop,spend,impressions,reach,clicks,results";
+
+/**
+ * Meta ad-account refs need the `act_` prefix; operators paste bare numbers.
+ * Also strips stray quotes/whitespace (a real .env hygiene bug found in G1:
+ * the saved value contained a literal quote char, and the raw ref 404'd).
+ */
+export function normalizeAdAccountRef(raw: string): string {
+  const s = raw.trim().replace(/[^0-9a-z_]/gi, "");
+  if (/^act_\d+$/.test(s)) return s;
+  return s ? `act_${s}` : "";
+}
 
 /** GET a single Graph API object, throwing on any non-2xx (so a bad token /
  *  rate limit surfaces loudly instead of silently writing zeros). */
@@ -215,79 +236,119 @@ async function apiGetAll(path: string, token: string, apiVersion: string, extra:
 }
 
 /**
- * Pull one ad account: campaigns → ad sets → ad creatives → DAILY insights
- * (one spend row per ad per day, spec 5.7). Spend is stored in the account's
- * billing currency AND INR via the stored daily FX rate (fx-store). A failure
- * on any account is thrown to the caller (the orchestrator isolates it).
+ * Pull one ad account (spec 5.7): account meta → ad objects (with ad set +
+ * campaign + creative) → per-ad insights rollup. Verified live 2026-10-29 on
+ * act_…2164 (v23.0): the account's insights `time_range` param 400s, so we use
+ * the no-range rollup (one row per ad: [date_start, date_stop]); `day` is the
+ * rollup's date_stop. Spend is in the account's billing currency and is
+ * converted to INR via the stored daily FX rate (fx-store). A failure is
+ * thrown to the caller (the orchestrator isolates it per account).
  */
 export async function pullAdAccount(
   prisma: PrismaClient,
   clientId: string,
   metaAccessToken: string,
   adAccountMetaId: string,
-  apiVersion = "v23.0",
-  days = 7
+  apiVersion = "v23.0"
 ): Promise<PullResult> {
   const token = metaAccessToken;
+  const ref = normalizeAdAccountRef(adAccountMetaId) || adAccountMetaId;
 
-  // 0) Account meta: name + billing currency (so INR conversion uses the
-  //    account's real currency, not a hard-coded "USD").
-  const acct = await apiGet(adAccountMetaId, token, apiVersion, "fields=name,currency");
+  // 0) Account meta: name + billing currency (INR accounts convert 1:1).
+  const acct = await apiGet(ref, token, apiVersion, "fields=name,currency,account_status");
   const currency = (acct?.currency ?? "USD").toUpperCase();
-  const accountName = acct?.name ?? adAccountMetaId;
+  const accountName = acct?.name ?? ref;
 
   const ads: PulledAd[] = [];
 
-  // 1) Campaigns → 2) ad sets → 3) ad creatives → 4) per-day insights.
-  const campaigns = await apiGetAll(`${adAccountMetaId}/campaigns`, token, apiVersion, "fields=id,name,status");
-  for (const c of campaigns) {
-    const adsets = await apiGetAll(`${c.id}/adsets`, token, apiVersion, "fields=id,name,status,creative");
-    for (const s of adsets) {
-      const creatives = await apiGetAll(`${s.id}/adcreatives`, token, apiVersion, "fields=id,image_url,object_story_spec");
-      for (const cr of creatives) {
-        // Stable ad-object id = `<adset>_<creative>` (legacy shape, spec 5.7).
-        const adMetaId = `${s.id}_${cr.id}`;
-        const thumb =
-          cr.image_url ??
-          cr.object_story_spec?.attachments?.[0]?.image?.url ??
-          null;
-        const creativeType = cr.object_story_spec?.attachments?.[0]?.type === "VIDEO" ? "VIDEO" : "IMAGE";
+  // 1) Ad objects with their ad set + campaign + creative (ad objects ARE the
+  //    spend units in modern Meta; the legacy adset_creative id is gone).
+  const adObjects = await apiGetAll(
+    `${ref}/ads`,
+    token,
+    apiVersion,
+    "fields=id,name,status,campaign{id,name},adset{id,name},creative{object_story_spec}"
+  );
 
-        // 4) DAILY insights for the look-back window (one row per day).
-        const insights = await apiGetAll(
-          "insights",
-          token,
-          apiVersion,
-          `level=ad&ad_id=${encodeURIComponent(adMetaId)}&time_range=${recentDays(days)}&fields=${INSIGHT_FIELDS}`
-        );
-        for (const it of insights) {
-          const day = it.date ?? today();
-          ads.push({
-            adId: adMetaId,
-            adsetId: s.id,
-            campaignId: c.id,
-            name: `${c.name} / ${s.name}`,
-            status: c.status ?? "ACTIVE",
-            creative: { type: creativeType, thumbnailUrl: thumb, url: cr.object_story_spec?.attachments?.[0]?.link ?? null },
-            day,
-            spend: num(it.spend),
-            impressions: num(it.impressions),
-            reach: num(it.reach),
-            clicks: num(it.clicks),
-            linkClicks: num(it.link_clicks),
-            thruPlays: num(it.video_play_thru_play_15s),
-            metaConversions: num(it.leads) + num(it.purchases),
-          });
-        }
-      }
+  for (const ad of adObjects) {
+    const adset = ad.adset ?? {};
+    const campaign = ad.campaign ?? {};
+    const attach = ad.creative?.object_story_spec?.attachments?.[0] ?? {};
+    const thumb =
+      attach.image?.url ?? attach.animated_image?.url ?? attach.video?.url ?? attach.link ?? null;
+    const creativeType =
+      attach.type === "VIDEO" || attach.video?.url ? "VIDEO" : "IMAGE";
+
+    // 2) Per-ad insights rollup, no time_range (verified shape, see above).
+    const insights = await apiGetAll(
+      `${ad.id}/insights`,
+      token,
+      apiVersion,
+      `fields=${INSIGHT_FIELDS}&limit=100`
+    );
+    for (const it of insights) {
+      const row: PulledAd = {
+        adId: ad.id,
+        adsetId: adset.id ?? adset.name ?? "unknown_set",
+        campaignId: campaign.id ?? campaign.name ?? "unknown_campaign",
+        adsetName: adset.name ?? null,
+        campaignName: campaign.name ?? null,
+        name: `${campaign.name ?? campaign.id ?? "campaign"} / ${adset.name ?? adset.id ?? "adset"} / ${ad.name ?? ad.id}`,
+        status: ad.status ?? campaign.status ?? "ACTIVE",
+        creative: { type: creativeType, thumbnailUrl: thumb, url: attach.link ?? null },
+        day: it.date_stop ?? today(), // the rollup window's last day
+        spend: num(it.spend),
+        impressions: num(it.impressions),
+        reach: num(it.reach),
+        clicks: num(it.clicks),
+        linkClicks: num(it.clicks), // link_clicks is invalid on this version; clicks is the proxy (documented)
+        thruPlays: 0, // video_play fields invalid here; documented proxy
+        metaConversions: resultsToConversions(it.results),
+      };
+      ads.push(row);
+    }
+    // An ad with no spend data in the window still gets a zero row so the
+    // report shows it (spec 7 wasted-spend needs the ad to be visible).
+    if (insights.length === 0) {
+      ads.push({
+        adId: ad.id,
+        adsetId: adset.id ?? adset.name ?? "unknown_set",
+        campaignId: campaign.id ?? campaign.name ?? "unknown_campaign",
+        name: `${campaign.name ?? campaign.id ?? "campaign"} / ${adset.name ?? adset.id ?? "adset"} / ${ad.name ?? ad.id}`,
+        status: ad.status ?? "ACTIVE",
+        creative: { type: creativeType, thumbnailUrl: thumb, url: attach.link ?? null },
+        day: today(),
+        spend: 0,
+        impressions: 0,
+        reach: 0,
+        clicks: 0,
+        linkClicks: 0,
+        thruPlays: 0,
+        metaConversions: 0,
+      });
     }
   }
 
-  // 5) Resolve the stored daily FX rate for every pulled day (spec 5.7).
+  // 3) Stored daily FX rate for every pulled day (spec 5.7). INR accounts are
+  //    identity — no live FX fetch happens for them.
   const dayList = [...new Set(ads.map((a) => a.day))];
   const { byDay: fxRates, liveFills } = await resolveDayRates(prisma, currency, dayList);
 
-  return upsertPulled(prisma, clientId, adAccountMetaId, accountName, currency, ads, fxRates, liveFills);
+  return upsertPulled(prisma, clientId, ref, accountName, currency, ads, fxRates, liveFills);
+}
+
+/**
+ * Meta's `results` payload is a list of {indicator, value, action_type}
+ * conversion entries. Sum their values as the Meta-reported-conversions
+ * proxy for the Meta-vs-Track report (spec 7). Defensive: shapes vary.
+ */
+export function resultsToConversions(results: unknown): number {
+  if (!Array.isArray(results)) return 0;
+  let total = 0;
+  for (const r of results) {
+    total += Number((r as any)?.value ?? 0) || 0;
+  }
+  return total;
 }
 
 /**
@@ -300,14 +361,13 @@ export async function pullAllAccounts(
   clientId: string,
   metaAccessToken: string,
   adAccountIds: string[],
-  apiVersion = "v23.0",
-  days = 7
+  apiVersion = "v23.0"
 ): Promise<{ results: PullResult[]; failures: { account: string; error: string }[] }> {
   const results: PullResult[] = [];
   const failures: { account: string; error: string }[] = [];
   for (const acctId of adAccountIds) {
     try {
-      results.push(await pullAdAccount(prisma, clientId, metaAccessToken, acctId, apiVersion, days));
+      results.push(await pullAdAccount(prisma, clientId, metaAccessToken, acctId, apiVersion));
     } catch (e: any) {
       failures.push({ account: acctId, error: String(e?.message ?? e) });
     }
@@ -321,19 +381,13 @@ export function isSimulateMode(): boolean {
   return process.env.META_SIMULATE === "1";
 }
 
-// Ad id in Meta is `<adset_id>_<creative_id>` (legacy "ad object" style) — we
-// keep that shape so the `Ad.metaId` join is stable across pulls.
+// Ad objects ARE the spend units in modern Meta (adset_creative ids are gone),
+// so `Ad.metaId` = the ad object id (stable across pulls, per ad).
 function num(v: unknown): number {
   return Number(v ?? 0) || 0;
 }
 function today(): string {
   return new Date().toISOString().slice(0, 10);
-}
-/** Meta `time_range` for a look-back of N days: `{YYYY-MM-DD,YYYY-MM-DD}`. */
-function recentDays(days: number): string {
-  const to = new Date().toISOString().slice(0, 10);
-  const from = new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
-  return `{${from},${to}}`;
 }
 
 // ---------------------------------------------------------------------------

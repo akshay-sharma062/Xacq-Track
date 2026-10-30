@@ -5,11 +5,12 @@
  *   pnpm meta:verify-token
  *
  * What it does (all output is REAL, none of it is simulated):
- *   1. GET /me            — is the token live? shows the identity it belongs to.
- *   2. GET /me/accounts   — ad account(s) the token can access (what G1 pulls).
- *   3. For the first account: GET /{acct}/insights?time_range=last_1d
- *      with spend,impressions,clicks — the live-GET the G1 VERIFY step asks
- *      for, shown to you with real numbers.
+ *   1. GET /me                  — is the token live? shows the identity.
+ *   2. GET /me?fields=adaccounts — the ad accounts the token can actually pull.
+ *   3. Live spend read on the configured account (META_AD_ACCOUNT_IDS):
+ *      GET /act_…/insights (NO time_range — verified shape, G1 2026-10-29:
+ *      this account's insights 400s on every time_range variant, the
+ *      no-range call returns the default 30-day rollup).
  *
  * It never prints the token. Errors are shown verbatim from Meta so a
  * bad-scope / expired token is diagnosable without guessing.
@@ -19,7 +20,6 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 function env(key) {
-  // Read .env minimally (no dotenv dep) — process.env wins if set.
   if (process.env[key]) return process.env[key];
   try {
     const here = dirname(fileURLToPath(import.meta.url));
@@ -32,8 +32,15 @@ function env(key) {
   }
 }
 
-const token = env("META_ACCESS_TOKEN");
-const apiVersion = env("META_API_VERSION") || "v23.0";
+/** Meta ad-account refs need the act_ prefix; operators paste bare numbers. */
+function normalizeAcct(raw) {
+  const s = raw.trim().replace(/[^0-9a-z_]/gi, "");
+  return /^act_\d+$/.test(s) ? s : s ? `act_${s}` : "";
+}
+
+const tokenRaw = env("META_ACCESS_TOKEN");
+const token = tokenRaw.replace(/[\s"']/g, ""); // hygiene: strip stray chars (G1 bug)
+const apiVersion = (env("META_API_VERSION") || "v23.0").trim();
 
 if (!token) {
   console.error("✗ META_ACCESS_TOKEN is empty in .env — add the system-user token first.");
@@ -55,32 +62,34 @@ async function get(path, extra = "") {
 try {
   // 1) Token liveness + identity.
   const me = await get("me", "fields=id,name");
-  console.log(`✓ /me            — token live, identity: ${me.name ?? "(unnamed)"} (id ${me.id})`);
+  console.log(`✓ /me             — token live, identity: ${me.name ?? "(unnamed)"} (id ${me.id})`);
 
-  // 2) Accessible ad accounts.
-  const accounts = await get("me", "fields=accounts{name,id,currency}");
-  const adAccounts = accounts.accounts?.data ?? [];
+  // 2) Accessible ad accounts (G1 fix: /me?fields=adaccounts — NOT the
+  //    deprecated `accounts` edge, which silently returns 0).
+  const reachable = await get("me", "fields=adaccounts");
+  const adAccounts = reachable.adaccounts?.data ?? [];
+  console.log(`✓ /me adaccounts  — ${adAccounts.length} account(s) reachable`);
   if (adAccounts.length === 0) {
     console.log("✗ Token is valid but sees NO ad accounts — grant Business access (ads_management) in Business Settings.");
     process.exit(1);
   }
-  for (const a of adAccounts) {
-    console.log(`  ad account: ${a.name} (${a.id}, currency ${a.currency})`);
+
+  // 3) Live spend read on the configured account — the G1 "live GET" verify.
+  const ids = (env("META_AD_ACCOUNT_IDS").replace(/[^0-9,]/g, "")).split(",").filter(Boolean);
+  for (const id of ids) {
+    const ref = normalizeAcct(id);
+    const acct = await get(ref, "fields=name,currency,account_status");
+    console.log(`✓ account ${ref} — "${acct.name}" (${acct.currency}, status ${acct.account_status})`);
+    // No time_range: the verified working shape (account's 30-day rollup).
+    const insights = await get(`${ref}/insights`, "fields=date_start,date_stop,spend,impressions,clicks");
+    for (const r of insights.data ?? []) {
+      console.log(`   rollup ${r.date_start} → ${r.date_stop}: spend=${r.spend} ${acct.currency}  impressions=${r.impressions}  clicks=${r.clicks}`);
+    }
+    if (!(insights.data ?? []).length) console.log("   (no insights rows in the default window)");
   }
 
-  // 3) Live 1-day insights on the first account — the G1 "live GET" verify.
-  const first = adAccounts[0];
-  const insights = await get(`accounts/${first.id}/insights`, "time_range=last_1d&fields=spend,impressions,clicks,reach,leads");
-  const rows = insights.data ?? [];
-  console.log(`✓ live insights  — ${first.name} (last_1d):`);
-  for (const r of rows) {
-    console.log(`    ${r.date}  spend=${r.spend} ${first.currency}  impressions=${r.impressions}  clicks=${r.clicks}  reach=${r.reach}`);
-  }
-  if (rows.length === 0) {
-    console.log("    (no rows for last_1d — account may have no spend today; try `time_range` backfill via the app)");
-  }
-
-  console.log("\nNext: put these ad account IDs in .env (META_AD_ACCOUNT_IDS=…)\n        then run `pnpm pull:once` to do the real pull into the DB.");
+  console.log("\nNext: `pnpm pull:once` to run the real pull into the DB,");
+  console.log("then spot-check 3 ads against Meta Ads Manager (G1 PASS GATE: within 1%).");
 } catch (e) {
   console.error(`✗ ${e.message}`);
   process.exit(1);

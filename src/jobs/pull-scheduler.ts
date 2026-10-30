@@ -18,7 +18,32 @@
  * console.error (Sentry is wired in G10).
  */
 import { prisma } from "../lib/prisma";
-import { pullAllAccounts } from "../lib/meta/pull";
+import { pullAllAccounts, normalizeAdAccountRef } from "../lib/meta/pull";
+import { readFileSync, existsSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+/**
+ * Load `.env` into `process.env` for the CLI entry (`pnpm jobs:pull` /
+ * `pull:once`). Next.js auto-loads .env for routes, but a bare `tsx` process
+ * does not — and a scheduler that can't see its token would "skip" every
+ * night silently. Existing process.env values always win. Values are never
+ * logged.
+ */
+function loadDotEnv(): void {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const envPath = join(here, "..", "..", ".env");
+  if (!existsSync(envPath)) return;
+  for (const line of readFileSync(envPath, "utf8").split(/\r?\n/)) {
+    const m = /^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line.trim());
+    if (!m || line.trim().startsWith("#")) continue;
+    let v = m[2].trim();
+    if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+      v = v.slice(1, -1);
+    }
+    if (process.env[m[1]] === undefined) process.env[m[1]] = v;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Pure cadence (unit-tested)
@@ -30,12 +55,6 @@ export function cadenceForHour(h: number): Cadence | null {
   if (h === 2) return "backfill30"; // nightly backfill (spec: "every night")
   if (h % 3 === 1 && h >= 7 && h <= 22) return "daily1"; // 07,10,13,16,19,22
   return null; // idle: 0,1,3,4,5,6,23
-}
-
-/** Look-back days for a cadence: nightly refreshes the 30-day report window;
- *  daytime pulls only the current day (re-pulling today as spend accrues). */
-export function daysForCadence(c: Cadence): number {
-  return c === "backfill30" ? 30 : 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -57,7 +76,7 @@ export interface PullPassResult {
  * the token is absent (then it skips, never throws — a missing secret must
  * not crash the scheduler).
  */
-export async function runDuePulls(opts: { days?: number } = {}): Promise<PullPassResult> {
+export async function runDuePulls(): Promise<PullPassResult> {
   const out: PullPassResult = {
     tokenPresent: false,
     simulateMode: process.env.META_SIMULATE === "1",
@@ -67,10 +86,14 @@ export async function runDuePulls(opts: { days?: number } = {}): Promise<PullPas
   };
   const token = process.env.META_ACCESS_TOKEN ?? "";
   out.tokenPresent = Boolean(token);
-  const days = opts.days ?? 7;
+  const apiVersion = process.env.META_API_VERSION || "v23.0";
 
-  // Every (client, ad account) pair configured in the DB.
-  const pairs = await prisma.adAccount.findMany({ select: { clientId: true, metaId: true } });
+  // Every (client, ad account) pair configured in the DB. Meta refs need the
+  // `act_` prefix (operators store bare numbers) — normalise on use.
+  const pairs = (await prisma.adAccount.findMany({ select: { clientId: true, metaId: true } })).map((p) => ({
+    ...p,
+    metaId: normalizeAdAccountRef(p.metaId),
+  }));
   if (pairs.length === 0) out.skipped.push("no AdAccount rows configured");
 
   // Env-listed accounts (G1 handoff: the operator's ad account list) attach to
@@ -82,7 +105,11 @@ export async function runDuePulls(opts: { days?: number } = {}): Promise<PullPas
   if (envIds.length && !out.simulateMode) {
     const firstClient = pairs[0]?.clientId ?? "cl_fitness";
     for (const metaId of envIds) {
-      pairs.push({ clientId: firstClient, metaId });
+      const ref = normalizeAdAccountRef(metaId);
+      // De-dup against DB-stored accounts (same normalised ref, any client).
+      if (!pairs.some((p) => p.metaId === ref)) {
+        pairs.push({ clientId: firstClient, metaId: ref });
+      }
     }
   }
 
@@ -96,7 +123,7 @@ export async function runDuePulls(opts: { days?: number } = {}): Promise<PullPas
   if (token && !out.simulateMode) {
     for (const p of pairs) {
       try {
-        const { results, failures } = await pullAllAccounts(prisma, p.clientId, token, [p.metaId], undefined, days);
+        const { results, failures } = await pullAllAccounts(prisma, p.clientId, token, [p.metaId], apiVersion);
         out.ran.push({
           clientId: p.clientId,
           account: p.metaId,
@@ -133,9 +160,12 @@ export function startLoop(): { stop: () => void } {
     const key = `${dayKey}|${hour}|${cadence}`;
     if (firedToday.has(key)) return;
     firedToday.add(key);
+    // Meta insights on this account only expose the no-range rollup (30-day
+    // window), so both cadence slots pull the same rollup — the cadence label
+    // is kept for the log + dedup key only.
     console.log(`[pull-scheduler] firing ${cadence} at local ${String(hour).padStart(2, "0")}:00`);
     try {
-      const res = await runDuePulls({ days: daysForCadence(cadence) });
+      const res = await runDuePulls();
       console.log(`[pull-scheduler] pass done: ${JSON.stringify({ ran: res.ran.length, failures: res.failures.length, skipped: res.skipped })}`);
     } catch (e: any) {
       console.error(`[pull-scheduler] pass failed: ${e?.message ?? e}`);
@@ -156,6 +186,7 @@ export function startLoop(): { stop: () => void } {
 // CLI entry: `pnpm jobs:pull` → resident loop; `pnpm pull:once` → one pass.
 const isMain = process.argv[1]?.endsWith("pull-scheduler.ts") ?? false;
 if (isMain) {
+  loadDotEnv(); // .env for a bare tsx process (Next.js would do this for routes).
   const mode = process.argv.includes("once") ? "once" : "loop";
   if (mode === "once") {
     runDuePulls()

@@ -10,7 +10,7 @@
  *   POST /api/jobs/pull   header: `x-job-secret: <CRON_PULL_SECRET>`
  */
 import { NextRequest, NextResponse } from "next/server";
-import { runDuePulls, cadenceForHour, daysForCadence } from "@/jobs/pull-scheduler";
+import { runDuePulls, cadenceForHour } from "@/jobs/pull-scheduler";
 
 export async function POST(req: NextRequest) {
   const secret = req.headers.get("x-job-secret");
@@ -26,7 +26,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ fired: false, reason: `no pull due at ${String(hour).padStart(2, "0")}:00 ${tz}` });
   }
 
-  const res = await runDuePulls({ days: daysForCadence(cadence) });
+  const res = await runDuePulls();
   return NextResponse.json({
     fired: true,
     cadence,

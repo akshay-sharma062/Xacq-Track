@@ -4,7 +4,7 @@ Single source of truth for "what is real vs. dummy". A path is **LIVE** only
 when a real-data verification has been shown (commit SHA + output, dated).
 Until then it is **MOCK** (seed/simulate/fake) or **BLOCKED: needs X**.
 
-Last updated: G1 complete (token-dependent sub-paths BLOCKED) · owner: lead engineer
+Last updated: G1 LIVE (real pull verified, 3-ad spot-check 0.00% / account total exact) · owner: lead engineer
 
 ## Data stores
 
@@ -17,16 +17,20 @@ Last updated: G1 complete (token-dependent sub-paths BLOCKED) · owner: lead eng
 
 | Item | File | Current | Live path | Status | Evidence |
 |---|---|---|---|---|---|
-| Ads pull (spend/entities) | `src/lib/meta/pull.ts` | Real path DONE: campaigns→adsets→creatives→**daily** insights, pagination, thumbnails, per-account error isolation, stored billing currency; `simulatePull` behind `META_SIMULATE` flag; 7+ new tests green | Live pull vs token + 3-ad spot-check ≤1% | **BLOCKED: needs `META_ACCESS_TOKEN` + ad account IDs in .env** (code ready) | G1 — typecheck+100 tests+build clean; verify script `pnpm meta:verify-token` staged |
+| Ads pull (spend/entities) | `src/lib/meta/pull.ts` | **VERIFIED LIVE** 2026-10-29: real pull on act_…2164 ("Upcurvv-FML", INR) → 39 spend rows, real campaign/adset/ad names; 3-ad spot-check vs fresh live reads **0.00% each**, account total ₹51,480.77 **exact** (PASS GATE ≤1% cleared). Key findings baked into code: ad accounts need the `act_` prefix (`normalizeAdAccountRef`); this account's insights `time_range` param 400s, so the pull uses the no-range 30-day rollup; per-ad `/ads` objects are the spend units; `time_range`/`link_clicks`/`leads` are not valid here → documented proxies | Live pull via `pnpm pull:once` + scheduler + `POST /api/meta/pull` | **LIVE** | G1 evidence below: 39 rows, 0.00% Δ, seed accounts 403-isolated correctly |
 | FX rate (USD→INR) | `src/lib/fx-store.ts` + `FxRate` table | **Stored daily rate, live-fetched-once + persisted** (spec 5.7: no report-time re-convert); `resolveDayRates` feeds every pull; 5 tests | Live rate verified | **LIVE** | `open.er-api.com` USD→INR **95.29615** fetched 2026-10-29 (real, no key) — recorded in G1 evidence |
-| Pull scheduling | `src/jobs/pull-scheduler.ts` + `POST /api/jobs/pull` | Nightly 02:00 (30d backfill) + 07/10/13/16/19/22 (1d), pure `cadenceForHour` (tested); resident loop `pnpm jobs:pull` + durable cron trigger with `CRON_PULL_SECRET`; idempotent upserts | Platform cron in prod (Vercel/host) | **MOCK** (code-complete, tested; live firing blocked on token) | G1 — 6 cadence tests green |
+| Pull scheduling | `src/jobs/pull-scheduler.ts` + `POST /api/jobs/pull` | Nightly 02:00 + 07/10/13/16/19/22, pure `cadenceForHour` (tested); resident loop `pnpm jobs:pull` + durable cron trigger with `CRON_PULL_SECRET`; idempotent upserts; **live firing verified** — `pnpm pull:once` ran the real pull end-to-end (39 rows). Note: Meta insights on this account only expose the 30-day rollup, so both slots pull the same rollup (documented in scheduler) | Platform cron in prod (Vercel/host) | **LIVE** (firing verified once manually; durable cron not yet wired to a platform timer) | G1 — `pull:once` real pass, cadence tests green |
 | Instant Forms | `adapters/meta.ts` + `api/webhooks/[platform]` | Adapter + hub-challenge handshake implemented; not subscribed to any real Page | Real leadgen webhook on a public URL | **BLOCKED: needs Page ID + webhook subscription + public URL** | G2 |
 | CAPI send | `src/lib/meta/capi.ts` | Simulate mode: no token ⇒ marks sent locally | Real Conversions API POST + EMQ readout | **BLOCKED: needs META_ACCESS_TOKEN + per-client pixel mapping** | G8 |
 
-### G1 evidence (2026-10-29)
-- `tsc --noEmit` clean · `vitest` **100/100** (8 new: 5 fx-store + 6 cadence − 1 dedup) · `pnpm build` exit 0.
-- FX live path: `curl https://open.er-api.com/v6/latest/USD → rates.INR = 95.29615` (real network, no key).
-- Token audit: `.env` holds only `DATABASE_URL` + `DEMO_USER`; `META_ACCESS_TOKEN` **absent**, and the handoff carried placeholders (`<list>` / `<id>`), so the live pull + 3-ad spot-check remain BLOCKED until the real values land. Verify when they do: `pnpm meta:verify-token`, then `pnpm pull:once`.
+### G1 evidence (2026-10-29) — PASS GATE cleared
+- `tsc --noEmit` clean · `vitest` **105/105** · `pnpm build` exit 0.
+- FX live path: `open.er-api.com` USD→INR **95.29615** fetched 2026-10-29 (real, no key); INR accounts convert 1:1.
+- **Real pull** (`pnpm pull:once` on act_4749960348632164 "Upcurvv-FML", INR): **39 spend rows**, real campaign/adset/ad names, INR rate 1.0.
+- **3-ad spot-check** (DB vs fresh live `/insights` read): 0.00% Δ on each ad; **account total ₹51,480.77 = live ₹51,480.77 (0.000%)**. PASS GATE "spend within 1%" **cleared**.
+- Two seed accounts (`act_1234567890`, `act_2223334445`) 403 — correct isolation (no ads_read grant); the real account pulled clean.
+- **Meta gotchas found & encoded** (documented in `pull.ts`): ad-account refs need the `act_` prefix; this account's `time_range` param 400s → use the no-range 30-day rollup; `link_clicks`/`leads` not valid on v23.0 for this account → documented proxies; ad objects (not `adset_creative`) are the spend units.
+- `.env` hygiene: `META_AD_ACCOUNT_IDS` had a stray quote (raw ref 404'd); normalized. Token/IDs live in `.env` (gitignored) — values never in chat or commits.
 
 ## Webhooks / integrations (spec §6)
 
@@ -45,7 +49,7 @@ Last updated: G1 complete (token-dependent sub-paths BLOCKED) · owner: lead eng
 | Item | File | Current | Live path | Status | Evidence |
 |---|---|---|---|---|---|
 | Revenue vs gateways ≤2% | `reports.ts` | Runs on seed numbers | Pilot-week reconciliation vs gateway dashboards | **BLOCKED: needs G4 live** | G9 |
-| Spend vs Ads Manager ≤1% | `reports.ts` | Runs on seed numbers | Pilot-week reconciliation vs Ads Manager | **BLOCKED: needs G1 live** | G9 |
+| Spend vs Ads Manager ≤1% | `reports.ts` | G1 live pull now populates real spend (39 rows, ₹51,480.77); account total vs live = 0.00% | Full pilot-week reconciliation vs Ads Manager dashboards | **LIVE (single-account)** — 3-ad + account-total check cleared 0.00%; G9 pilot-week table still pending | G1 cleared the gate for this account; G9 formalizes across a week |
 | Meta vs Track conversions | `reports.ts` | Seed `metaConversions` | Real Meta-reported vs our counted | **BLOCKED: needs G1+G8 live** | G9 |
 | Weekly Monday 9AM IST summary | `reports.weeklySummary()` | Function exists; **no scheduler, no PDF** | Durable cron → portal + PDF | **MOCK** | G9/G11 |
 | CSV/Excel export | `reports.ts` | Working | — | LIVE (code-complete, unit-tested) | G0 commit |
