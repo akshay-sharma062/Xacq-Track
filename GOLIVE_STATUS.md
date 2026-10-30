@@ -4,7 +4,7 @@ Single source of truth for "what is real vs. dummy". A path is **LIVE** only
 when a real-data verification has been shown (commit SHA + output, dated).
 Until then it is **MOCK** (seed/simulate/fake) or **BLOCKED: needs X**.
 
-Last updated: G1 LIVE · G2 SKIPPED-DEFERRED (PO decision 2026-10-30; gate order now G3→G4→G5→G6→G7→G8→G9→G10→G11) · owner: lead engineer
+Last updated: G1 LIVE · G2 SKIPPED-DEFERRED (PO decision 2026-10-30; gate order now G3→G4→G5→G6→G7→G8→G9→G10→G11) · public tunnel verified 2026-10-30 · owner: lead engineer
 
 ## Data stores
 
@@ -32,11 +32,27 @@ Last updated: G1 LIVE · G2 SKIPPED-DEFERRED (PO decision 2026-10-30; gate order
 - **Meta gotchas found & encoded** (documented in `pull.ts`): ad-account refs need the `act_` prefix; this account's `time_range` param 400s → use the no-range 30-day rollup; `link_clicks`/`leads` not valid on v23.0 for this account → documented proxies; ad objects (not `adset_creative`) are the spend units.
 - `.env` hygiene: `META_AD_ACCOUNT_IDS` had a stray quote (raw ref 404'd); normalized. Token/IDs live in `.env` (gitignored) — values never in chat or commits.
 
+## Public tunnel (dev webhooks + xt.js ingest host)
+
+| Item | Value | Status |
+|---|---|---|
+| Public URL | `https://competitive-gilbert-observation-hospitals.trycloudflare.com` → `http://localhost:3100` | **LIVE** — verified end-to-end 2026-10-30 |
+| Tunnel | cloudflared quick tunnel (user-run, no account) | Valid only while the process + the :3100 app run; **not** the G10 Vercel target |
+
+End-to-end verification through the public URL (2026-10-30, UTC):
+
+- `GET /` → **200**; `GET /api/session` → **200** (real session: owner `arpit@…`, clients `cl_fitness` + `cl_iitprep`); `GET /xt.js` → **200**, 5,071 B served.
+- `POST /api/ingest` (xt.js `ad_click` touchpoint, `cl_fitness`, with `ad_id`/`adset_id`/`campaign_id` + UTM) → **accepted**, persisted to DB: a `Touchpoint` row with `adId=12025344100000001`, `utmSource=facebook`, `visitorId` set, no lead (anonymous ad click). `events:0` is expected — that counter counts **lead-bearing** events; an ad click with no phone/email attaches to a visitor, not a lead.
+- Meta `hub.challenge` handshake `GET /api/webhooks/meta` → **200, exact challenge echo** with the stored `.env` verify token; **403** on a wrong token (route reachable + gate works through the tunnel).
+
+This URL is the host for **G3** (paste `xt.js` + `API_BASE`) and the inbound base for **G4** payment/gateway webhooks. It is a **temporary** dev endpoint: G10 replaces it with Vercel + a stable domain, and both must be re-pointed then.
+
 ## Webhooks / integrations (spec §6)
 
 | Item | File | Current | Live path | Status | Evidence |
 |---|---|---|---|---|---|
-| xt.js on landing pages | `xt/` → `public/xt.js` (4.95 KB) | Built + served at `/xt.js`; queue/retry; **not deployed to any live page** | Pasted on all pilot landing pages; ≥95% of leads carry ad_id/UTM | **MOCK: not deployed** | G3 |
+| Public tunnel for webhooks/ingest | cloudflared quick tunnel | Live, verified end-to-end 2026-10-30 (see "Public tunnel" above) | Stable base for G3 `xt.js` + G4 gateway webhooks; retired at G10 | **LIVE (temporary)** | Public tunnel block |
+| xt.js on landing pages | `xt/` → `public/xt.js` (4.95 KB) | Built + served at `/xt.js` (5,071 B) via tunnel; **not deployed to any live page** | Pasted on all pilot landing pages; ≥95% of leads carry ad_id/UTM | **MOCK: not deployed** | G3 |
 | Meta dynamic URL params | — (Ads Manager side) | Unaudited | `{{campaign.id}}/{{adset.id}}/{{ad.id}}` on every ad URL; app audit screen | **MOCK** | G3 |
 | Razorpay / Cashfree / Cosmofeed | `adapters/payments.ts` + `api/webhooks` | HMAC verify implemented; secrets are seed fakes (`whsec_*`) | Real gateway webhooks + real secrets + ₹1 test payments + 3× replay dedup proof | **BLOCKED: needs gateway secrets + test payments** | G4 |
 | TagMango / FlexiFunnels | `adapters/payments.ts` | Implemented | Real webhooks | **BLOCKED: needs platform URLs + secrets** | G4 |
