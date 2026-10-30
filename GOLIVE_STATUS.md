@@ -4,7 +4,7 @@ Single source of truth for "what is real vs. dummy". A path is **LIVE** only
 when a real-data verification has been shown (commit SHA + output, dated).
 Until then it is **MOCK** (seed/simulate/fake) or **BLOCKED: needs X**.
 
-Last updated: G1 LIVE (real pull verified, 3-ad spot-check 0.00% / account total exact) · owner: lead engineer
+Last updated: G1 LIVE · G2 SKIPPED-DEFERRED (PO decision 2026-10-30; gate order now G3→G4→G5→G6→G7→G8→G9→G10→G11) · owner: lead engineer
 
 ## Data stores
 
@@ -20,7 +20,7 @@ Last updated: G1 LIVE (real pull verified, 3-ad spot-check 0.00% / account total
 | Ads pull (spend/entities) | `src/lib/meta/pull.ts` | **VERIFIED LIVE** 2026-10-29: real pull on act_…2164 ("Upcurvv-FML", INR) → 39 spend rows, real campaign/adset/ad names; 3-ad spot-check vs fresh live reads **0.00% each**, account total ₹51,480.77 **exact** (PASS GATE ≤1% cleared). Key findings baked into code: ad accounts need the `act_` prefix (`normalizeAdAccountRef`); this account's insights `time_range` param 400s, so the pull uses the no-range 30-day rollup; per-ad `/ads` objects are the spend units; `time_range`/`link_clicks`/`leads` are not valid here → documented proxies | Live pull via `pnpm pull:once` + scheduler + `POST /api/meta/pull` | **LIVE** | G1 evidence below: 39 rows, 0.00% Δ, seed accounts 403-isolated correctly |
 | FX rate (USD→INR) | `src/lib/fx-store.ts` + `FxRate` table | **Stored daily rate, live-fetched-once + persisted** (spec 5.7: no report-time re-convert); `resolveDayRates` feeds every pull; 5 tests | Live rate verified | **LIVE** | `open.er-api.com` USD→INR **95.29615** fetched 2026-10-29 (real, no key) — recorded in G1 evidence |
 | Pull scheduling | `src/jobs/pull-scheduler.ts` + `POST /api/jobs/pull` | Nightly 02:00 + 07/10/13/16/19/22, pure `cadenceForHour` (tested); resident loop `pnpm jobs:pull` + durable cron trigger with `CRON_PULL_SECRET`; idempotent upserts; **live firing verified** — `pnpm pull:once` ran the real pull end-to-end (39 rows). Note: Meta insights on this account only expose the 30-day rollup, so both slots pull the same rollup (documented in scheduler) | Platform cron in prod (Vercel/host) | **LIVE** (firing verified once manually; durable cron not yet wired to a platform timer) | G1 — `pull:once` real pass, cadence tests green |
-| Instant Forms | `adapters/meta.ts` + `api/webhooks/[platform]` | Adapter + hub-challenge handshake implemented; not subscribed to any real Page | Real leadgen webhook on a public URL | **BLOCKED: needs Page ID + webhook subscription + public URL** | G2 |
+| Instant Forms | `adapters/meta.ts` + `api/webhooks/[platform]` | Adapter + hub-challenge handshake implemented; not subscribed to any real Page | SKIPPED-DEFERRED. Product-owner decision 2026-10-30: Meta Instant Forms deferred. Code dormant, not on go-live path. Re-add its pass-gate only when G2 is scheduled. (The `/act_…/leadgen_leads` 2500 seen during probing is EXPECTED — LeadGen hangs off a Page, not an ad account; no Page is wired. Existing `meta_form_lead` adapter + its tests are left dormant and green, untouched.) | — | **SKIPPED-DEFERRED** | G2 deferred (PO decision 2026-10-30) |
 | CAPI send | `src/lib/meta/capi.ts` | Simulate mode: no token ⇒ marks sent locally | Real Conversions API POST + EMQ readout | **BLOCKED: needs META_ACCESS_TOKEN + per-client pixel mapping** | G8 |
 
 ### G1 evidence (2026-10-29) — PASS GATE cleared
@@ -53,6 +53,12 @@ Last updated: G1 LIVE (real pull verified, 3-ad spot-check 0.00% / account total
 | Meta vs Track conversions | `reports.ts` | Seed `metaConversions` | Real Meta-reported vs our counted | **BLOCKED: needs G1+G8 live** | G9 |
 | Weekly Monday 9AM IST summary | `reports.weeklySummary()` | Function exists; **no scheduler, no PDF** | Durable cron → portal + PDF | **MOCK** | G9/G11 |
 | CSV/Excel export | `reports.ts` | Working | — | LIVE (code-complete, unit-tested) | G0 commit |
+
+> **G2-deferred consequence (PO decision 2026-10-30, recorded on G9 too):**
+> "Lead source mix" will show **Instant Form = 0%** — expected, not a bug.
+> CAPI **Lead** events come from `form_submit` (xt.js) and CSV imports, not
+> `meta_form_lead`. G2's gate ("100% of Instant Form leads land <1 min with
+> ad_id") is **dropped** from the G9 checklist; G8 dedup rules unchanged.
 
 ## Platform / security (spec §8, §10)
 

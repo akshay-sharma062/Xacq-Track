@@ -48,30 +48,50 @@ Date: 2026-10-29 · Engineer: Claude Opus 5 · Commits: c9e80e6 (G1 code) + this
   Marketing API insights with daily breakdown when `time_range` works again;
   tracked as a known limitation, not a blocker for the 1% gate.
 
-## What stays BLOCKED (unchanged)
-- G2 Instant Forms (needs Page ID + webhook subscription + public URL),
-  G4–G7 webhooks (secrets/actions), G8 CAPI EMQ gate, G10 platform.
+## G2 SKIPPED — product-owner decision (2026-10-30)
+G2 (Meta Instant Forms) is **SKIPPED-DEFERRED** for the current go-live scope.
+Code is left dormant and green (adapter + its replay tests untouched); the
+`/act_…/leadgen_leads` 2500 seen during probing is expected (LeadGen hangs off
+a Page, not an ad account; no Page is wired). Re-add G2's pass-gate only when
+it is scheduled.
+
+**Consequences (recorded):**
+- "Lead source mix" report will show **Instant Form = 0%** — expected, not a bug.
+- CAPI **Lead** events will come from `form_submit` (xt.js) and CSV imports
+  instead of `meta_form_lead` (the ingest pipeline already maps
+  `form_submit → Lead`, `registered → CompleteRegistration`; no CAPI change).
+- G8 dedup rules unchanged (`event_id` idempotency + never-send-twice).
+- G9 checklist: G2's gate ("100% of Instant Form leads land <1 min with ad_id")
+  **dropped**; the G2-deferred consequence (Instant Form = 0% in source mix;
+  Lead events from form_submit/CSV) noted on G9.
+
+**New gate order:** G3 → G4 → G5 → G6 → G7 → G8 → G9 → G10 → G11.
+
+## What stays BLOCKED (after G2 deferral)
+- G4–G7 webhooks (secrets/actions), G8 CAPI EMQ gate, G10 platform.
 - Weekly 9AM summary cron + PDF (G9/G11) — pull cadence cron itself is wired,
   just not attached to a platform timer yet.
 
 ## Next handoff card
 ```
-STEP G2: Meta Instant Forms → real leads (spec §5.2)
+STEP G3: xt.js live on landing pages + Meta dynamic URL params (spec §5.1)
 YOU PROVIDE:
-  1) The Page ID used for Instant Forms — Meta Business Suite → Pages →
-     (click your Page) → copy the Page ID. (You have 25 ad accounts in
-     Business; the Page lives in one of them.)
-  2) Meta Business Suite → Webhooks → Instant Forms: create/subscribe a
-     webhook to https://<your public URL>/api/webhooks/meta?client=<clientId>
-     with your verify token (already in .env as META_LEADGEN_WEBHOOK_VERIFY_TOKEN).
-     For dev we need a public URL: say "run cloudflared" and I'll start the
-     tunnel + capture the URL for you to paste into Meta.
-  3) Fill one test Instant Form on a real ad (so it carries ad_id).
-CLAUDE DOES: verify the hub.challenge handshake live against the tunnel URL,
-  confirm a real lead row appears <1 min with ad_id non-null + your earlier
-  page-views attached (visit a pilot landing page first), per-form field
-  mapping, dedup by phone. Commit [REVIEW].
-PASS GATE: "100% of pilot Instant Form leads land within 1 minute with ad_id".
-BLOCKED-IF: no public URL → I prepare cloudflared; no Page ID → sub-paths stay
-  BLOCKED: needs Page ID; nothing else waits.
+  1) Confirmation that public/xt.js is pasted into the pilot landing pages
+     (Lovable / FlexiFunnels / TagMango / WordPress):
+       <script src="<your-host>/xt.js" data-client="<clientId>" defer></script>
+     and is loadable at that URL.
+  2) In Meta Ads Manager, campaign URL templates use {{campaign.id}} /
+     {{adset.id}} / {{ad.id}} — confirm per ad account. Give one working ad
+     link per pilot account so I can test the click from a phone.
+  3) The clientId(s) to wire on the pilot pages.
+CLAUDE DOES: final xt.js build (<10 KB, served at /xt.js, offline queue+retry),
+  a param-audit helper that flags ad URLs missing the dynamic params, and a
+  live touchpoint monitor (last 50 rows: which carry ad_id/UTM vs not).
+VERIFY: click a real ad link on your phone (known visitor_id cookie) →
+  page_view + ad_click touchpoints appear with ad_id within <30 s; audit
+  shows which ads still lack params.
+PASS GATE: "≥ 95% of landing-page leads carry an ad_id or UTM" (measured on
+  pilot traffic; the app shows this % live).
+BLOCKED-IF: no pasted-script confirmation → I ship the audit + monitor now and
+  the 95% measurement stays BLOCKED: needs live landing pages.
 ```
