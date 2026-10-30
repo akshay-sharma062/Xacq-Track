@@ -47,6 +47,22 @@ End-to-end verification through the public URL (2026-10-30, UTC):
 
 This URL is the host for **G3** (paste `xt.js` + `API_BASE`) and the inbound base for **G4** payment/gateway webhooks. It is a **temporary** dev endpoint: G10 replaces it with Vercel + a stable domain, and both must be re-pointed then.
 
+## G3 status (updated 2026-10-30, partial — BLOCKED on PO inputs)
+
+| G3 sub-item | Status | Evidence |
+|---|---|---|
+| Final `xt.js` build | **DONE** — 4.95 KB (5,071 B), served at `/xt.js`, 200 via tunnel; <10 KB target met | `public/xt.js`, GET through tunnel |
+| Param-audit helper (ad URLs carry `{{campaign.id}}/{{adset.id}}/{{ad.id}}` or UTM) | **BLOCKED: needs ad destination links** | `scripts/audit-ad-urls.mjs` ran live via G1 token: all 39 creatives resolve to **id-only** (`object_story_spec`/`link_data` come back empty — the token has no creative-content read on this account, and `link_data` is invalid on `/ads` in v23.0). A truthful "0 templates" would be a false negative, so the verdict is deferred to PO-provided ad links/templates. |
+| Live touchpoint monitor (≥95% of landing-page leads carry ad_id or UTM) | **MET on stored data — with a caveat** | All 11 stored touchpoints carry ad_id/UTM (100%) = `ad_click` ×7, `form_submit` ×2, `page_view` ×1, `meta_form_lead` ×1; 4 carry UTM, 7 carry fbclid. But only **2 of 11 are live** (today's tunnel test POSTs); the other 9 are seed/replay. The gate is re-measured against real traffic once `xt.js` is on pilot pages. |
+
+**Still BLOCKED — PO must provide (4 values):**
+1. `xt.js` actually pasted on pilot landing pages + the host URL they call (this tunnel URL until G10)
+2. Ads Manager URL templates / one working ad link per account (the param audit above cannot read creative URLs with the G1 token)
+3. Confirmation that ad links use `{{campaign.id}}/{{adset.id}}/{{ad.id}}`
+4. Pilot client id(s)
+
+No G3 gate pass is claimed; the ≥95% number above is a stored-data snapshot, not live-traffic proof.
+
 ## Webhooks / integrations (spec §6)
 
 | Item | File | Current | Live path | Status | Evidence |
