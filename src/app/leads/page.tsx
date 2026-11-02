@@ -40,10 +40,14 @@ export default async function LeadsPage({
 
   const q = typeof sp.q === "string" ? sp.q : undefined;
   const stage = typeof sp.stage === "string" ? sp.stage : undefined;
-  const rows = await searchLeads(
-    { clientId, q, stage, funnelId: sp.funnel, from: sp.from, to: sp.to },
-    s
-  );
+  const filters = { q, stage, funnelId: sp.funnel, from: sp.from, to: sp.to };
+  const rows = await searchLeads(filters, s);
+  // D-02 post-purge honesty: distinguish "no leads exist yet" (valid state
+  // before G3/G4 live traffic) from "your filter matched nothing".
+  const anyLeads =
+    Object.values(filters).every((v) => !v)
+      ? rows.length > 0
+      : await prisma.lead.count({ where: { clientId } }).then((n) => n > 0);
 
   const client = await prisma.client.findUnique({ where: { id: clientId } });
 
@@ -78,7 +82,15 @@ export default async function LeadsPage({
             </tr>
           </thead>
           <tbody>
-            {rows.length === 0 && (
+            {rows.length === 0 && !anyLeads && (
+              <tr>
+                <td colSpan={6} className="empty">
+                  No leads yet — live traffic starts when G3 (xt.js on
+                  join.upcurvv.com/cll) and G4 (gateway webhooks) are live.
+                </td>
+              </tr>
+            )}
+            {rows.length === 0 && anyLeads && (
               <tr>
                 <td colSpan={6} className="empty">
                   No leads match.

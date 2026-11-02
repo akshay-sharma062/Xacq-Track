@@ -3,14 +3,18 @@ import { freshDb } from "./helpers";
 import { processInbound } from "../src/lib/ingest";
 import { cashfreeAdapter } from "../src/lib/adapters/payments";
 
-const FIT = "cl_fitness";
+// D-01/D-02: the seed clients are gone. The pipeline is tested against the
+// bootstrapped tenancy client (what `pnpm db:seed` now creates). The ad ids in
+// the meta payloads are fixture values — adRefId resolution tolerates a
+// missing ad row (denormalised, null-safe), so no ad entity is required here.
+const FIT = "cl_upcurvv";
 
-function metaLead(phone: string, email: string, adId = "ad_101") {
+function metaLead(phone: string, email: string, adId = "fx_ad_1") {
   return JSON.stringify({
     id: `lead_${phone}`,
     ad_id: adId,
-    adset_id: "aset_1",
-    campaign_id: "cam_launch",
+    adset_id: "fx_aset_1",
+    campaign_id: "fx_cam_1",
     fields: [
       { name: "What is your name?", value: "Fresh Person" },
       { name: "Phone number", value: phone },
@@ -130,7 +134,7 @@ describe("ingest e2e (spec 4/5/6: one pipeline, identity, dedup, source-unknown)
     const body = JSON.stringify(cashfreeAdapter.sample);
     // Non-null secret -> verify() runs; we give it a wrong signature.
     const res = await processInbound({
-      prisma, clientId: FIT, platform: "cashfree", clientSecret: "whsec_fit_000",
+      prisma, clientId: FIT, platform: "cashfree", clientSecret: "whsec_test_000",
       rawBody: body,
       headers: { "cf-signature": "0000", "cf-timestamp": "0", rawBody: body },
     });
@@ -148,12 +152,13 @@ describe("ingest e2e (spec 4/5/6: one pipeline, identity, dedup, source-unknown)
       prisma, clientId: FIT, platform: "meta", clientSecret: null,
       rawBody: metaLead("9812340088", "log@x.com"), headers: {},
     });
-    // Newest first — the seed also has a processed meta webhook (wh_005).
+    // Newest first — no seed webhook rows exist now; the pipeline's own log
+    // is the one we assert (spec 4: raw kept for re-processing).
     const log = await prisma.webhookLog.findFirst({
       where: { platform: "meta", status: "processed" },
       orderBy: { receivedAt: "desc" },
     });
-    expect(log?.rawPayload).toMatch("9812340088"); // raw kept for re-processing (spec 4)
+    expect(log?.rawPayload).toMatch("9812340088");
     await close();
   });
 });

@@ -22,6 +22,16 @@ export async function GET() {
     ? await prisma.client.findMany({ where: { id: { in: visible } }, select: { id: true, name: true } })
     : [];
 
+  // D-01: the ad-account filter options, driven by the AdAccount link rows
+  // (one Meta account today: Upcurvv-FML). Real DB data, not a canned list.
+  const adAccounts = visible.length
+    ? await prisma.adAccount.findMany({
+        where: { clientId: { in: visible } },
+        select: { metaId: true, name: true, displayOwnerName: true, currency: true, status: true, clientId: true },
+        orderBy: { name: "asc" },
+      })
+    : [];
+
   // Demo personas = users in the same workspace as the acting user (or all
   // users when unauthenticated, so the switcher always has options).
   const users = await prisma.user.findMany({
@@ -35,6 +45,7 @@ export async function GET() {
       ? { email: s.email, name: s.name, role: s.role, maskPhone: s.maskPhone, clientIds: visible }
       : null,
     clients,
+    adAccounts,
     personas: users,
     roles: ROLES,
   });

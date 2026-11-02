@@ -103,7 +103,10 @@ export async function runDuePulls(): Promise<PullPassResult> {
     .map((s) => s.trim())
     .filter(Boolean);
   if (envIds.length && !out.simulateMode) {
-    const firstClient = pairs[0]?.clientId ?? "cl_fitness";
+    // D-02: seed client ids are gone; env-listed accounts attach to the live
+    // Upcurvv client (the only real client post seed-purge) when no DB
+    // AdAccount pair is configured yet.
+    const firstClient = pairs[0]?.clientId ?? "cl_upcurvv";
     for (const metaId of envIds) {
       const ref = normalizeAdAccountRef(metaId);
       // De-dup against DB-stored accounts (same normalised ref, any client).

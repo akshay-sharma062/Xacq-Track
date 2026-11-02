@@ -11,7 +11,7 @@ import { prisma } from "@/lib/prisma";
 import { getSession, resolveClient } from "@/lib/api-utils";
 import {
   funnelReport, adPerformance, wastedSpend, newVsOld, metaVsTrack, sourceMix,
-  weeklySummary, toCsv, toXlsx,
+  weeklySummary, toCsv, toXlsx, resolveAdAccountId,
 } from "@/lib/reports";
 import { auditExport } from "@/lib/security";
 import { AttributionModel } from "@/lib/types";
@@ -29,17 +29,20 @@ export async function GET(req: NextRequest) {
 
   const client = await prisma.client.findUnique({ where: { id: clientId } });
   const offerPrice = client?.offerPrice ?? 0;
+  // D-01 ad-account filter: ?adAccount=<metaId> scopes the SPEND-family
+  // reports to one Meta ad account (resolver verifies it belongs to the client).
+  const adAccountId = await resolveAdAccountId(prisma, clientId, sp.get("adAccount"));
 
   let data: unknown;
   let csv: string[] = [];
   switch (key) {
-    case "funnel": data = await funnelReport(prisma, clientId, 30 * 86_400_000, model, windowDays); break;
-    case "ad_perf": data = await adPerformance(prisma, clientId, 30 * 86_400_000, "ad", model, windowDays, offerPrice); break;
-    case "wasted_spend": data = await wastedSpend(prisma, clientId, 2000, 30 * 86_400_000); break;
+    case "funnel": data = await funnelReport(prisma, clientId, 30 * 86_400_000, model, windowDays, adAccountId); break;
+    case "ad_perf": data = await adPerformance(prisma, clientId, 30 * 86_400_000, "ad", model, windowDays, offerPrice, adAccountId); break;
+    case "wasted_spend": data = await wastedSpend(prisma, clientId, 2000, 30 * 86_400_000, adAccountId); break;
     case "new_vs_old": data = await newVsOld(prisma, clientId, 30 * 86_400_000); break;
-    case "meta_vs_track": data = await metaVsTrack(prisma, clientId, 30 * 86_400_000, model, windowDays); break;
+    case "meta_vs_track": data = await metaVsTrack(prisma, clientId, 30 * 86_400_000, model, windowDays, adAccountId); break;
     case "source_mix": data = await sourceMix(prisma, clientId); break;
-    case "weekly": data = await weeklySummary(prisma, clientId, model, windowDays); break;
+    case "weekly": data = await weeklySummary(prisma, clientId, model, windowDays, adAccountId); break;
     default: return NextResponse.json({ error: `unknown report '${key}'` }, { status: 400 });
   }
 

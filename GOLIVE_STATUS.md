@@ -4,14 +4,15 @@ Single source of truth for "what is real vs. dummy". A path is **LIVE** only
 when a real-data verification has been shown (commit SHA + output, dated).
 Until then it is **MOCK** (seed/simulate/fake) or **BLOCKED: needs X**.
 
-Last updated: G1 LIVE · G2 SKIPPED-DEFERRED (PO decision 2026-10-30; gate order now G3→G4→G5→G6→G7→G8→G9→G10→G11) · public tunnel verified 2026-10-30 · owner: lead engineer
+Last updated: G1 LIVE · G2 SKIPPED-DEFERRED · D-01/D-02 ad-account recenter + seed purge DONE · public tunnel verified 2026-10-30 · owner: lead engineer
 
 ## Data stores
 
 | Item | File | Current | Live path | Status | Evidence |
 |---|---|---|---|---|---|
-| Database | `prisma/dev.db` (SQLite) | Seed: 12 leads, 26 events, 120 spend rows | Postgres Mumbai (Supabase/Neon ap-south) + data copy | **MOCK** | G10 |
-| Seed dataset | `src/lib/seed.ts` | Fake names/phones/payments | Real pilot data via webhooks + import | MOCK | — |
+| Database | `prisma/dev.db` (SQLite) | Post-D-02: only G1 real rows — 1 client `cl_upcurvv`, 1 ad account (Upcurvv-FML), 3 campaigns / 13 ad sets / 39 ads / 39 spend rows (₹51,480.77); **0** leads/events/payments/webhooks | Postgres Mumbai (Supabase/Neon ap-south) + data copy | **LIVE (single-account)** | D-02 migration 2026-10-30 (verified post-state) |
+| Seed dataset | `src/lib/seed.ts` | D-02: `pnpm db:seed` creates ONLY tenancy (workspace, 2 staff users, `cl_upcurvv`, empty ad-account link row) — no fake leads/spend | Real pilot data via G3 xt.js + G4 webhooks | **DONE (seed purged)** | Fresh-DB proof: leads=0, events=0, spend=G1 rows only |
+| **Ad-account recentering + seed purge** | `DECISIONS.md` D-01/D-02 | `AdAccount` = organizing entity (`displayOwnerName` + `status` columns); G1 tree re-parented `cl_fitness → cl_upcurvv`; `?adAccount=<metaId>` filter wired through reports + Topbar; all seed client ids removed from data paths/UI | — | **DONE** | D-01/D-02 (commit this change) |
 
 ## Meta (spec §3, §5.2, §5.7, §5.8)
 
@@ -41,9 +42,9 @@ Last updated: G1 LIVE · G2 SKIPPED-DEFERRED (PO decision 2026-10-30; gate order
 
 End-to-end verification through the public URL (2026-10-30):
 
-- **First run** (old subdomain `competitive-gilbert…`): `GET /` → **200**; `GET /api/session` → **200** (real session: owner `arpit@…`, clients `cl_fitness` + `cl_iitprep`); `GET /xt.js` → **200**, 5,071 B served.
+- **First run** (old subdomain `competitive-gilbert…`): `GET /` → **200**; `GET /api/session` → **200** (real session: owner `arpit@…`); `GET /xt.js` → **200**, 5,071 B served.
 - **Current URL** (`oak-alpha-rewards-workstation`, from filled G3_INPUTS.md): `GET /` → **200**; `GET /api/session` → **200**; `GET /xt.js` → **200**, 5,071 B (checked 16:10 IST). Old subdomain returns 000 (tunnel was restarted).
-- `POST /api/ingest` (xt.js `ad_click` touchpoint, `cl_fitness`, with `ad_id`/`adset_id`/`campaign_id` + UTM) → **accepted**, persisted to DB: a `Touchpoint` row with `adId=12025344100000001`, `utmSource=facebook`, `visitorId` set, no lead (anonymous ad click). `events:0` is expected — that counter counts **lead-bearing** events; an ad click with no phone/email attaches to a visitor, not a lead.
+- `POST /api/ingest` (xt.js `ad_click` touchpoint with `ad_id`/`adset_id`/`campaign_id` + UTM) → **accepted**, persisted: a `Touchpoint` with `adId` + `utmSource` set, no lead (anonymous ad click). `events:0` is expected — that counter counts **lead-bearing** events. *(These pre-purge probe rows were removed in D-02; the round-trip itself was the verification.)*
 - Meta `hub.challenge` handshake `GET /api/webhooks/meta` → **200, exact challenge echo** with the stored `.env` verify token; **403** on a wrong token (route reachable + gate works through the tunnel).
 
 This URL is the host for **G3** (paste `xt.js` + `API_BASE`) and the inbound base for **G4** payment/gateway webhooks. It is a **temporary** dev endpoint: G10 replaces it with Vercel + a stable domain, and both must be re-pointed then.
@@ -61,52 +62,46 @@ This URL is the host for **G3** (paste `xt.js` + `API_BASE`) and the inbound bas
 | Check | Result |
 |---|---|
 | `OPTIONS /api/ingest` preflight (Origin `join.upcurvv.com`) | **204** + `ACAO: https://join.upcurvv.com`, `Allow-Headers: Content-Type`, `Max-Age: 86400` |
-| Exact xt.js `POST /api/ingest` (page_view w/ ad_id + UTM, `cl_fitness`) | **200 accepted**, persisted: `Touchpoint` ad_click, `adId=12025344100000001`, `utmSource=facebook`, `client=cl_fitness` |
+| Exact xt.js `POST /api/ingest` (page_view w/ ad_id + UTM) | **200 accepted**, persisted: `Touchpoint` ad_click with `adId` + `utmSource` set |
 | Missing `client` | 400 `client required` (CORS headers still present) |
 | Unknown `client` | 404 |
 
 **Param-audit on PO's real template (from filled G3_INPUTS.md): PASSES.** `https://join.upcurvv.com/cll?campaign_id={{campaign.id}}&adset_id={{adset.id}}&ad_id={{ad.id}}` — the delivered URL's `campaign_id`/`adset_id`/`ad_id` query keys are exactly what xt.js's extractor reads (`xt/src/index.ts` lines 63–65). Every delivered ad click carries an ad_id **by construction** → the "≥95% of landing-page leads carry ad_id or UTM" gate is satisfied by construction; the live-traffic re-measure happens once the snippet below is pasted. Re-runnable: `node scripts/audit-g3-link.mjs "<delivered link>"`.
 
-**Remaining open item (1 of 4):** `client` / `pilot clientIds` in G3_INPUTS.md is still "Arpit Sharma" (owner name, not a DB id) — `BHARNA: cl_fitness ya cl_iitprep`. The paste snippet + round-trip used `cl_fitness`; flip it to the real pilot id before deploying.
+**data-client resolved (D-01/D-02):** `client` / `pilot clientIds` = `cl_upcurvv`
+(the seed clients `cl_fitness`/`cl_iitprep` are gone post-purge; `cl_upcurvv`
+is the only client). All 4 G3 sub-values are now real — no `BHARNA` left.
 
-**Paste-ready snippet for `https://join.upcurvv.com/cll`** (host verified, client = the one `BHARNA`):
+**Paste-ready snippet for `https://join.upcurvv.com/cll`** (host verified,
+client = `cl_upcurvv`):
 
 ```html
 <script src="https://oak-alpha-rewards-workstation.trycloudflare.com/xt.js"
         data-api="https://oak-alpha-rewards-workstation.trycloudflare.com"
-        data-client="<cl_fitness-or-cl_iitprep>"
+        data-client="cl_upcurvv"
         defer></script>
 ```
 
----
-
-## G3 status (earlier snapshot 16:10 IST — superseded above)
-
-| G3 sub-item | Status | Evidence |
+## G3 status (post D-02 remodel, 2026-10-30 — gate now LIVE-traffic-only)
 
 | G3 sub-item | Status | Evidence |
 |---|---|---|
-| Final `xt.js` build | **DONE** — 4.95 KB (5,071 B), served at `/xt.js`, 200 via tunnel; <10 KB target met | `public/xt.js`, GET through tunnel |
-| **Host URL (G3 input #1)** | **DONE** — `oak-alpha-rewards-workstation.trycloudflare.com` verified live 16:10 IST (`/`, `/api/session`, `/xt.js` all 200) | filled `G3_INPUTS.md`, re-checked via GET |
-| Param-audit helper (ad URLs carry `{{campaign.id}}/{{adset.id}}/{{ad.id}}` or UTM) | **BLOCKED: needs ad destination links** | `scripts/audit-ad-urls.mjs` ran live via G1 token: all 39 creatives resolve to **id-only** (`object_story_spec`/`link_data` come back empty — the token has no creative-content read on this account, and `link_data` is invalid on `/ads` in v23.0). A truthful "0 templates" would be a false negative, so the verdict is deferred to PO-provided ad links/templates. |
-| Live touchpoint monitor (≥95% of landing-page leads carry ad_id or UTM) | **MET on stored data — with a caveat** | All 11 stored touchpoints carry ad_id/UTM (100%) = `ad_click` ×7, `form_submit` ×2, `page_view` ×1, `meta_form_lead` ×1; 4 carry UTM, 7 carry fbclid. But only **2 of 11 are live** (today's tunnel test POSTs); the other 9 are seed/replay. **0 new touchpoints since 15:30 IST** — no live page traffic yet. Gate re-measured once `xt.js` is on pilot pages. |
+| Final `xt.js` build | **DONE** — 4.96 KB (<10 KB), served at `/xt.js` via tunnel; contract fixed (`POST /api/ingest` + top-level `client`), CORS preflight added | `public/xt.js`; commit `6feec32` |
+| Host URL | **DONE** — `oak-alpha-rewards-workstation.trycloudflare.com` live (re-verify before paste; quick-tunnel subdomains die with the process) | GET `/`, `/xt.js` 200 |
+| data-client | **RESOLVED** → `cl_upcurvv` (D-01) | `G3_INPUTS.md` |
+| Param-audit | **PASSES by construction** — the PO template's `campaign_id`/`adset_id`/`ad_id` query keys are exactly what xt.js's extractor reads (`xt/src/index.ts` L63–65) | `node scripts/audit-g3-link.mjs "<link>"` |
+| **≥95% ad_id/UTM gate** | **AWAITING LIVE TRAFFIC** (D-03) | 0 leads is a valid state pre G3/G4. The gate is measured ONLY on real `POST /api/ingest` traffic under `cl_upcurvv` once the snippet is pasted — stored-data snapshots no longer count (deleted). Needs ~20+ live clicks to be meaningful; until then status is AWAITING LIVE TRAFFIC, never MET. |
 
-**Verified from filled `G3_INPUTS.md` (disk-read):** host URL (above).
-**Still BLOCKED — the other 4 sub-values in `G3_INPUTS.md` are placeholder scaffolding, not values:**
-1. `pages:` — the pilot landing-page URL(s) where `xt.js` is pasted (note "not pasted yet" if so)
-2. `client:` — which client owns those pages (`cl_fitness` / `cl_iitprep`)
-3. `ad link (1 example)` — a real Ads Manager destination URL
-4. `template format` — which of `{{…}}` / UTM-only / mix, with a concrete example link
-5. `pilot clientIds:` — the client id(s) the gate scopes to
-
-No G3 gate pass is claimed; the ≥95% number above is a stored-data snapshot (9 of 11 seed/replay), not live-traffic proof. The moment the 5 placeholders become real values, the param audit + gate re-measure run against them.
+**Pass evidence required (D-03):** after pasting the snippet, Meta delivers a
+real click → a touchpoint must land with `client=cl_upcurvv` + `adId` non-null.
+No seed backfill counts.
 
 ## Webhooks / integrations (spec §6)
 
 | Item | File | Current | Live path | Status | Evidence |
 |---|---|---|---|---|---|
 | Public tunnel for webhooks/ingest | cloudflared quick tunnel | Live, verified end-to-end 2026-10-30 (see "Public tunnel" above) | Stable base for G3 `xt.js` + G4 gateway webhooks; retired at G10 | **LIVE (temporary)** | Public tunnel block |
-| xt.js on landing pages | `xt/` → `public/xt.js` (4.95 KB) | Built + served at `/xt.js` (5,071 B) via tunnel; **not deployed to any live page** | Pasted on all pilot landing pages; ≥95% of leads carry ad_id/UTM | **MOCK: not deployed** | G3 |
+| xt.js on landing pages | `xt/` → `public/xt.js` (4.96 KB) | Built + served at `/xt.js` via tunnel; contract-fixed (`/api/ingest` + CORS); **not deployed to any live page** | Pasted on pilot pages (`cl_upcurvv`); ≥95% of leads carry ad_id/UTM — D-03: measured on LIVE traffic only | **AWAITING LIVE TRAFFIC** | G3 |
 | Meta dynamic URL params | — (Ads Manager side) | Unaudited | `{{campaign.id}}/{{adset.id}}/{{ad.id}}` on every ad URL; app audit screen | **MOCK** | G3 |
 | Razorpay / Cashfree / Cosmofeed | `adapters/payments.ts` + `api/webhooks` | HMAC verify implemented; secrets are seed fakes (`whsec_*`) | Real gateway webhooks + real secrets + ₹1 test payments + 3× replay dedup proof | **BLOCKED: needs gateway secrets + test payments** | G4 |
 | TagMango / FlexiFunnels | `adapters/payments.ts` | Implemented | Real webhooks | **BLOCKED: needs platform URLs + secrets** | G4 |
@@ -118,9 +113,9 @@ No G3 gate pass is claimed; the ≥95% number above is a stored-data snapshot (9
 
 | Item | File | Current | Live path | Status | Evidence |
 |---|---|---|---|---|---|
-| Revenue vs gateways ≤2% | `reports.ts` | Runs on seed numbers | Pilot-week reconciliation vs gateway dashboards | **BLOCKED: needs G4 live** | G9 |
-| Spend vs Ads Manager ≤1% | `reports.ts` | G1 live pull now populates real spend (39 rows, ₹51,480.77); account total vs live = 0.00% | Full pilot-week reconciliation vs Ads Manager dashboards | **LIVE (single-account)** — 3-ad + account-total check cleared 0.00%; G9 pilot-week table still pending | G1 cleared the gate for this account; G9 formalizes across a week |
-| Meta vs Track conversions | `reports.ts` | Seed `metaConversions` | Real Meta-reported vs our counted | **BLOCKED: needs G1+G8 live** | G9 |
+| Revenue vs gateways ≤2% | `reports.ts` | No payments yet (0 rows post-D-02; first real sale lands with G4) | Pilot-week reconciliation vs gateway dashboards | **BLOCKED: needs G4 live** | G9 |
+| Spend vs Ads Manager ≤1% | `reports.ts` | G1 live pull now populates real spend (39 rows, ₹51,480.77, re-parented to `cl_upcurvv` in D-01); account total vs live = 0.00% | Full pilot-week reconciliation vs Ads Manager dashboards | **LIVE (single-account)** — 3-ad + account-total check cleared 0.00%; G9 pilot-week table still pending | G1 cleared the gate for this account; G9 formalizes across a week |
+| Meta vs Track conversions | `reports.ts` | G1-pulled `metaConversions` (real pull values; 0 counted yet — no live traffic) | Real Meta-reported vs our counted | **BLOCKED: needs G3+G8 live** | G9 |
 | Weekly Monday 9AM IST summary | `reports.weeklySummary()` | Function exists; **no scheduler, no PDF** | Durable cron → portal + PDF | **MOCK** | G9/G11 |
 | CSV/Excel export | `reports.ts` | Working | — | LIVE (code-complete, unit-tested) | G0 commit |
 
@@ -134,7 +129,7 @@ No G3 gate pass is claimed; the ≥95% number above is a stored-data snapshot (9
 
 | Item | File | Current | Live path | Status | Evidence |
 |---|---|---|---|---|---|
-| Auth | `src/lib/session.ts` | `DEMO_USER` env + `xacqora_user` cookie; personas are seed users | Supabase/Clerk Auth + 2FA on all FL users | **MOCK** | G10/G11 |
+| Auth | `src/lib/session.ts` | `DEMO_USER` env + `xacqora_user` cookie; users = the two Foremost staff (owner + admin, D-02) | Supabase/Clerk Auth + 2FA on all FL users | **MOCK** | G10/G11 |
 | RLS | Postgres (not SQLite) | Query-layer `clientId` scoping only | DB-level RLS policies + negative test | **MOCK (no DB support yet)** | G10 |
 | Hosting | Next.js local (`next start`) | Local dev server | Vercel + Mumbai Postgres; tunnel retired | **MOCK** | G10 |
 | Backups / restore test | — | None | Daily backup + monthly real restore | **MOCK** | G10 |

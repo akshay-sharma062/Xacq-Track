@@ -70,21 +70,24 @@ export async function upsertPulled(
   ads: PulledAd[],
   fxRates: Map<string, number>,
   fxLiveFills = 0,
-  simulated = false
+  simulated = false,
+  status: string = "ACTIVE",
 ): Promise<PullResult> {
-  // 1) Ad account
+  // 1) Ad account. D-01: the link row carries displayOwnerName + Meta
+  // account_status so the ad-account filter control shows the live state.
   let account = await prisma.adAccount.findUnique({ where: { metaId: metaAccountId } });
   if (!account) {
     account = await prisma.adAccount.create({
       data: {
         metaId: metaAccountId, clientId, name: metaAccountName, currency,
+        displayOwnerName: metaAccountName, status,
         lastPulledAt: new Date(),
       },
     });
   } else {
     account = await prisma.adAccount.update({
       where: { metaId: metaAccountId },
-      data: { clientId, name: metaAccountName, currency, lastPulledAt: new Date() },
+      data: { clientId, name: metaAccountName, currency, status, lastPulledAt: new Date() },
     });
   }
   const accountId = account.id;
@@ -334,7 +337,7 @@ export async function pullAdAccount(
   const dayList = [...new Set(ads.map((a) => a.day))];
   const { byDay: fxRates, liveFills } = await resolveDayRates(prisma, currency, dayList);
 
-  return upsertPulled(prisma, clientId, ref, accountName, currency, ads, fxRates, liveFills);
+  return upsertPulled(prisma, clientId, ref, accountName, currency, ads, fxRates, liveFills, false, acct?.account_status ?? "ACTIVE");
 }
 
 /**

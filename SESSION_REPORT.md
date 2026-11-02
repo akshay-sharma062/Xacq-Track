@@ -72,26 +72,24 @@ it is scheduled.
 - Weekly 9AM summary cron + PDF (G9/G11) — pull cadence cron itself is wired,
   just not attached to a platform timer yet.
 
-## Next handoff card
+## Next step (post D-01/D-02 ad-account recenter + seed purge)
 ```
-STEP G3: xt.js live on landing pages + Meta dynamic URL params (spec §5.1)
-YOU PROVIDE:
-  1) Confirmation that public/xt.js is pasted into the pilot landing pages
-     (Lovable / FlexiFunnels / TagMango / WordPress):
-       <script src="<your-host>/xt.js" data-client="<clientId>" defer></script>
-     and is loadable at that URL.
-  2) In Meta Ads Manager, campaign URL templates use {{campaign.id}} /
-     {{adset.id}} / {{ad.id}} — confirm per ad account. Give one working ad
-     link per pilot account so I can test the click from a phone.
-  3) The clientId(s) to wire on the pilot pages.
-CLAUDE DOES: final xt.js build (<10 KB, served at /xt.js, offline queue+retry),
-  a param-audit helper that flags ad URLs missing the dynamic params, and a
-  live touchpoint monitor (last 50 rows: which carry ad_id/UTM vs not).
-VERIFY: click a real ad link on your phone (known visitor_id cookie) →
-  page_view + ad_click touchpoints appear with ad_id within <30 s; audit
-  shows which ads still lack params.
-PASS GATE: "≥ 95% of landing-page leads carry an ad_id or UTM" (measured on
-  pilot traffic; the app shows this % live).
-BLOCKED-IF: no pasted-script confirmation → I ship the audit + monitor now and
-  the 95% measurement stays BLOCKED: needs live landing pages.
+NEXT: paste the xt.js snippet on join.upcurvv.com/cll + 1 real Meta ad
+click test on phone.
+
+SNIPPET (concrete — cl_upcurvv is now the only client, D-01):
+  <script src="https://<CURRENT-TUNNEL>/xt.js"
+          data-api="https://<CURRENT-TUNNEL>"
+          data-client="cl_upcurvv"
+          defer></script>
+  (<CURRENT-TUNNEL> = the live quick-tunnel subdomain; re-verify it's up
+   before pasting — subdomains die with the cloudflared process.)
+
+WHEN YOU PASTE + Meta delivers a real click:
+  - touchpoint must land with client=cl_upcurvv + adId non-null (D-03 pass
+    evidence; no seed backfill counts — 0 leads is a valid state today).
+  - the ≥95% ad_id/UTM gate is measured on LIVE traffic only; needs ~20+
+    live clicks to be meaningful, else status stays "AWAITING LIVE TRAFFIC".
+
+THEN: gate G4 (Razorpay/Cashfree webhooks for cl_upcurvv).
 ```

@@ -238,7 +238,7 @@ export const sheetsAdapter: Adapter = {
 // The ingest API posts platform:"xt" batches; this adapter normalises each.
 // ---------------------------------------------------------------------------
 const XT_SAMPLE = {
-  client_id: "cl_fitness",
+  client_id: "cl_upcurvv", // D-01: single live client (seed ids purged); sample is fixture-own (spec 8)
   visitor_id: "v_001",
   event: "page_view",
   ad_id: "ad_101", adset_id: "aset_1", campaign_id: "cam_launch",

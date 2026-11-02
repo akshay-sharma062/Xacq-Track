@@ -23,19 +23,29 @@ export interface DashboardData {
   };
 }
 
+/**
+ * D-01: `adAccountId` (optional, the internal AdAccount row id) narrows the
+ * SPEND-family KPIs to one Meta ad account. Omitted = all accounts of the
+ * client. With one account today this is a no-op; the control is real.
+ */
 export async function dashboardFor(
   prisma: PrismaClient,
   clientId: string,
   model: AttributionModel = "last_paid_click",
-  windowDays = 30
+  windowDays = 30,
+  adAccountId?: string
 ): Promise<DashboardData> {
   const client = await prisma.client.findUnique({ where: { id: clientId } });
   const [funnel, mix, topAds, spendRows, leads] = await Promise.all([
-    funnelReport(prisma, clientId, 30 * DAY_MS, model, windowDays),
+    funnelReport(prisma, clientId, 30 * DAY_MS, model, windowDays, adAccountId),
     sourceMix(prisma, clientId),
-    adPerformance(prisma, clientId, 30 * DAY_MS, "ad", model, windowDays, client?.offerPrice ?? 0),
+    adPerformance(prisma, clientId, 30 * DAY_MS, "ad", model, windowDays, client?.offerPrice ?? 0, adAccountId),
     prisma.spend.findMany({
-      where: { clientId, day: { gte: dayStr(Date.now() - 30 * DAY_MS) } },
+      where: {
+        clientId,
+        day: { gte: dayStr(Date.now() - 30 * DAY_MS) },
+        ...(adAccountId ? { adAccountId } : {}),
+      },
     }),
     prisma.lead.findMany({ where: { clientId } }),
   ]);

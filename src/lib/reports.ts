@@ -98,16 +98,25 @@ export interface FunnelReport {
   roi: number; // (revenue - spend) / spend
 }
 
+/**
+ * D-01: ad-account filter scoping. `adAccountId` (the internal link id)
+ * narrows the SPEND-family reports to one Meta ad account; omitted = all
+ * accounts of the client. With one account today (Upcurvv-FML) this is a
+ * no-op, but the control is DB-driven and real, not a fake dropdown.
+ * Lead-side counts (leads/registered/…) stay client-scoped: a lead can be
+ * touched by ads from any account, so only spend is account-partitioned.
+ */
 export async function funnelReport(
   prisma: PrismaClient,
   clientId: string,
   rangeMs = 30 * DAY_MS,
   model: AttributionModel = "last_paid_click",
-  windowDays = 30
+  windowDays = 30,
+  adAccountId?: string
 ): Promise<FunnelReport> {
   const client = await prisma.client.findUnique({ where: { id: clientId } });
   const spendRows = await prisma.spend.findMany({
-    where: { clientId, day: { gte: dayStr(Date.now() - rangeMs) } },
+    where: { clientId, day: { gte: dayStr(Date.now() - rangeMs) }, ...(adAccountId ? { adAccountId } : {}) },
   });
   const spendNative = spendRows.reduce((s, r) => s + (r.spend ?? 0), 0);
   const spendInr = spendRows.reduce((s, r) => s + (r.inrSpend ?? 0), 0);
@@ -170,10 +179,11 @@ export async function adPerformance(
   level: AdLevel = "ad",
   model: AttributionModel = "last_paid_click",
   windowDays = 30,
-  offerPrice = 0
+  offerPrice = 0,
+  adAccountId?: string
 ): Promise<AdPerfRow[]> {
   const spendRows = await prisma.spend.findMany({
-    where: { clientId, day: { gte: dayStr(Date.now() - rangeMs) } },
+    where: { clientId, day: { gte: dayStr(Date.now() - rangeMs) }, ...(adAccountId ? { adAccountId } : {}) },
     include: { ad: { include: { adSet: { include: { campaign: true } }, creatives: true } } },
   });
 
@@ -244,9 +254,10 @@ export async function wastedSpend(
   prisma: PrismaClient,
   clientId: string,
   minSpendInr = 2000,
-  rangeMs = 30 * DAY_MS
+  rangeMs = 30 * DAY_MS,
+  adAccountId?: string
 ): Promise<WastedRow[]> {
-  const perf = await adPerformance(prisma, clientId, rangeMs, "ad", "last_paid_click", 30, 0);
+  const perf = await adPerformance(prisma, clientId, rangeMs, "ad", "last_paid_click", 30, 0, adAccountId);
   return perf
     .filter((r) => r.spendInr >= minSpendInr && r.sales === 0)
     .sort((a, b) => b.spendInr - a.spendInr)
@@ -300,10 +311,11 @@ export async function metaVsTrack(
   clientId: string,
   rangeMs = 30 * DAY_MS,
   model: AttributionModel = "last_paid_click",
-  windowDays = 30
+  windowDays = 30,
+  adAccountId?: string
 ): Promise<MetaVsTrackRow[]> {
   const spend = await prisma.spend.findMany({
-    where: { clientId, day: { gte: dayStr(Date.now() - rangeMs) } },
+    where: { clientId, day: { gte: dayStr(Date.now() - rangeMs) }, ...(adAccountId ? { adAccountId } : {}) },
     include: { ad: true },
   });
   const { sales } = await salesForClient(prisma, clientId, rangeMs);
@@ -367,20 +379,40 @@ export interface WeeklySummary {
   sourceMix: SourceMix;
   at: string; // generated timestamp
 }
+/**
+ * D-01 resolver: map a Meta ad-account `metaId` (what a URL carries, e.g.
+ * act_4749960348632164) to the internal AdAccount row id, verifying it belongs
+ * to the client. Returns undefined when no such account — so an unknown
+ * `?adAccount=` silently no-ops to the client-wide scope rather than 404-ing.
+ */
+export async function resolveAdAccountId(
+  prisma: PrismaClient,
+  clientId: string,
+  metaId: string | null | undefined
+): Promise<string | undefined> {
+  if (!metaId) return undefined;
+  const acct = await prisma.adAccount.findFirst({
+    where: { metaId, clientId },
+    select: { id: true },
+  });
+  return acct?.id;
+}
+
 export async function weeklySummary(
   prisma: PrismaClient,
   clientId: string,
   model: AttributionModel = "last_paid_click",
-  windowDays = 30
+  windowDays = 30,
+  adAccountId?: string
 ): Promise<WeeklySummary> {
   const client = await prisma.client.findUnique({ where: { id: clientId } });
   const offerPrice = client?.offerPrice ?? 0;
   const [funnel, ads, wasted, nv, mvt, mix] = await Promise.all([
-    funnelReport(prisma, clientId, 7 * DAY_MS, model, windowDays),
-    adPerformance(prisma, clientId, 7 * DAY_MS, "ad", model, windowDays, offerPrice),
-    wastedSpend(prisma, clientId, 2000, 7 * DAY_MS),
+    funnelReport(prisma, clientId, 7 * DAY_MS, model, windowDays, adAccountId),
+    adPerformance(prisma, clientId, 7 * DAY_MS, "ad", model, windowDays, offerPrice, adAccountId),
+    wastedSpend(prisma, clientId, 2000, 7 * DAY_MS, adAccountId),
     newVsOld(prisma, clientId, 7 * DAY_MS),
-    metaVsTrack(prisma, clientId, 7 * DAY_MS, model, windowDays),
+    metaVsTrack(prisma, clientId, 7 * DAY_MS, model, windowDays, adAccountId),
     sourceMix(prisma, clientId),
   ]);
   return {

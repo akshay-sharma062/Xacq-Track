@@ -1,17 +1,24 @@
 import { Topbar } from "./components/Topbar";
 import { Stat, BarChart, Meter, Thumbnail, inr, pct, SectionTitle } from "./components/ui";
-import { getSession, resolveClient } from "@/lib/api-utils";
+import { getSession, resolveClient, qs } from "@/lib/api-utils";
 import { dashboardFor } from "@/lib/dashboard";
+import { resolveAdAccountId } from "@/lib/reports";
 import { prisma } from "@/lib/prisma";
 import Link from "next/link";
 
 /**
  * Screen 1 — Dashboard. Funnel KPIs, spend by day, top ads, source mix, all
- * scoped to the visible client. Every number is live from the DB (spec 9).
+ * scoped to the visible client. D-01: also accepts `?adAccount=<metaId>` to
+ * narrow the SPEND-family KPIs to one Meta ad account. Every number is live
+ * from the DB (spec 9); a 0-lead dashboard is a valid state pre G3/G4.
  */
 export const dynamic = "force-dynamic";
 
-export default async function Dashboard() {
+export default async function Dashboard({
+  searchParams,
+}: {
+  searchParams: Promise<{ [key: string]: string | string[] | undefined }>;
+}) {
   const s = await getSession();
   if (!s) {
     return (
@@ -21,7 +28,8 @@ export default async function Dashboard() {
       </>
     );
   }
-  const clientId = await resolveClient(s, null);
+  const sp = qs(await searchParams);
+  const clientId = await resolveClient(s, sp.client);
   if (!clientId) {
     return (
       <>
@@ -31,12 +39,15 @@ export default async function Dashboard() {
     );
   }
 
-  const d = await dashboardFor(prisma, clientId, "last_paid_click", 30);
+  // D-01 ad-account filter (spends KPIs narrow to one Meta ad account).
+  const adAccountId = await resolveAdAccountId(prisma, clientId, sp.adAccount);
+  const d = await dashboardFor(prisma, clientId, "last_paid_click", 30, adAccountId);
   const f = d.funnel;
 
+  const acctLabel = sp.adAccount ? ` · ${sp.adAccount}` : "";
   return (
     <>
-      <Topbar title="Dashboard" crumb={`${s.name} · last 30 days`} />
+      <Topbar title="Dashboard" crumb={`${s.name} · last 30 days${acctLabel}`} />
 
       <div className="grid cols-4 mb">
         <Stat label="Ad spend (INR)" value={inr(f.spendInr)} sub={`${inr(f.revenueInr)} revenue · ROI ${pct(f.roi)}`} tone="accent" />

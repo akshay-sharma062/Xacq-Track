@@ -10,6 +10,17 @@ interface Persona {
   phoneMask: boolean;
 }
 
+// D-01: the ad-account filter options come straight from the AdAccount link
+// rows (session route) — one real account today (Upcurvv-FML), never a
+// canned dropdown.
+interface AdAccountOption {
+  metaId: string;
+  name: string;
+  displayOwnerName: string | null;
+  currency: string;
+  status: string;
+}
+
 /**
  * Top-of-page bar: the acting persona (switchable, spec 5.10 roles), the
  * current client (drives `?client=`), and a read-only / portal hint. Persona
@@ -23,8 +34,10 @@ export function Topbar({ title, crumb }: { title: string; crumb?: string }) {
   const [personas, setPersonas] = useState<Persona[]>([]);
   const [me, setMe] = useState<Persona | null>(null);
   const [clients, setClients] = useState<{ id: string; name: string }[]>([]);
+  const [adAccounts, setAdAccounts] = useState<AdAccountOption[]>([]);
 
   const clientId = sp.get("client") ?? "";
+  const adAccountId = sp.get("adAccount") ?? "";
 
   useEffect(() => {
     fetch("/api/session")
@@ -33,6 +46,7 @@ export function Topbar({ title, crumb }: { title: string; crumb?: string }) {
         setPersonas(j.personas ?? []);
         setMe(j.session ? { ...j.session } : null);
         setClients(j.clients ?? []);
+        setAdAccounts(j.adAccounts ?? []);
       })
       .catch(() => {});
   }, []);
@@ -49,6 +63,15 @@ export function Topbar({ title, crumb }: { title: string; crumb?: string }) {
     const next = new URLSearchParams(sp.toString());
     if (id) next.set("client", id);
     else next.delete("client");
+    // Switching client re-scopes the ad-account list, so drop the ad-account
+    // filter (it is client-specific) to avoid a stale `?adAccount=`.
+    next.delete("adAccount");
+    router.replace(`${pathname}?${next.toString()}`);
+  }
+  function switchAdAccount(metaId: string) {
+    const next = new URLSearchParams(sp.toString());
+    if (metaId) next.set("adAccount", metaId);
+    else next.delete("adAccount");
     router.replace(`${pathname}?${next.toString()}`);
   }
 
@@ -68,6 +91,20 @@ export function Topbar({ title, crumb }: { title: string; crumb?: string }) {
           {clients.map((c) => (
             <option key={c.id} value={c.id}>
               {c.name}
+            </option>
+          ))}
+        </select>
+        {/* D-01: ad-account filter, options from the AdAccount link rows. */}
+        <select
+          value={adAccountId}
+          onChange={(e) => switchAdAccount(e.target.value)}
+          style={{ minWidth: 150 }}
+          title="Filter reports by Meta ad account"
+        >
+          <option value="">All ad accounts</option>
+          {adAccounts.map((a) => (
+            <option key={a.metaId} value={a.metaId}>
+              {a.name} ({a.currency})
             </option>
           ))}
         </select>

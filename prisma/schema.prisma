@@ -292,8 +292,12 @@ model AdAccount {
   metaId   String @unique // the ad account number
   clientId String
   client   Client @relation(fields: [clientId], references: [id])
-  name     String
-  currency String @default("USD") // ad accounts often report in USD; we store INR too
+  name     String // Meta account name, e.g. "Upcurvv-FML"
+  // The owner the account is named after (display label; the client's name is
+  // derived from it — D-01 ad-account recentering, 2026-10-30).
+  displayOwnerName String?
+  status     String @default("ACTIVE") // ACTIVE | DISABLED | LOCKED (Meta account_status)
+  currency   String @default("USD") // ad accounts often report in USD; we store INR too
 
   campaigns AdCampaign[]
   adsets    AdSet[]
