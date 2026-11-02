@@ -256,10 +256,12 @@ function maybeRetry(): void {
 
 async function postBatch(items: Record<string, unknown>[]): Promise<void> {
   try {
-    await fetch(`${config.api || ""}/api/webhooks/ingest`, {
+    // Public ingest endpoint is /api/ingest; it scopes to the client from the
+    // top-level `client` field (spec 5.1), which is where the tenant lives.
+    await fetch(`${config.api || ""}/api/ingest`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ platform: "xt", events: items }),
+      body: JSON.stringify({ client: config.client, platform: "xt", events: items }),
       keepalive: true, // flush on tab close
     });
   } catch {

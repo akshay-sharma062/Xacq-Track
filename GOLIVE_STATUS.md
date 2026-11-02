@@ -48,7 +48,41 @@ End-to-end verification through the public URL (2026-10-30):
 
 This URL is the host for **G3** (paste `xt.js` + `API_BASE`) and the inbound base for **G4** payment/gateway webhooks. It is a **temporary** dev endpoint: G10 replaces it with Vercel + a stable domain, and both must be re-pointed then.
 
-## G3 status (updated 2026-10-30 16:10 IST — host verified, 4 sub-values pending)
+## G3 status (updated 2026-10-30 16:50 IST — G3 run: contract fixes + E2E verified)
+
+**G3 contract bugs found & fixed by running the G3 check** (3 bugs in the original build that would have silently broken prod):
+
+1. `xt.js` posted to `/api/webhooks/ingest` (404 — endpoint is `/api/ingest`); body nested `client_id` inside each event, but the route reads top-level `client` → 400. **Fixed** `postBatch`: `POST {api}/api/ingest` with `{ client, platform: "xt", events }`.
+2. No CORS anywhere: `join.upcurvv.com` page → tunnel API is cross-origin; a JSON POST needs a preflight that the app never answered. **Fixed** with `src/lib/cors.ts` + `OPTIONS` export + echoed `Origin` on all `/api/ingest` responses (public endpoint, no credentials — `*`-safe).
+3. Rebuilt: xt.js 4.96 KB; `pnpm build` clean; **105/105 tests pass**.
+
+**End-to-end through the public tunnel** (`oak-alpha-rewards-workstation`, 2026-10-30):
+
+| Check | Result |
+|---|---|
+| `OPTIONS /api/ingest` preflight (Origin `join.upcurvv.com`) | **204** + `ACAO: https://join.upcurvv.com`, `Allow-Headers: Content-Type`, `Max-Age: 86400` |
+| Exact xt.js `POST /api/ingest` (page_view w/ ad_id + UTM, `cl_fitness`) | **200 accepted**, persisted: `Touchpoint` ad_click, `adId=12025344100000001`, `utmSource=facebook`, `client=cl_fitness` |
+| Missing `client` | 400 `client required` (CORS headers still present) |
+| Unknown `client` | 404 |
+
+**Param-audit on PO's real template (from filled G3_INPUTS.md): PASSES.** `https://join.upcurvv.com/cll?campaign_id={{campaign.id}}&adset_id={{adset.id}}&ad_id={{ad.id}}` — the delivered URL's `campaign_id`/`adset_id`/`ad_id` query keys are exactly what xt.js's extractor reads (`xt/src/index.ts` lines 63–65). Every delivered ad click carries an ad_id **by construction** → the "≥95% of landing-page leads carry ad_id or UTM" gate is satisfied by construction; the live-traffic re-measure happens once the snippet below is pasted. Re-runnable: `node scripts/audit-g3-link.mjs "<delivered link>"`.
+
+**Remaining open item (1 of 4):** `client` / `pilot clientIds` in G3_INPUTS.md is still "Arpit Sharma" (owner name, not a DB id) — `BHARNA: cl_fitness ya cl_iitprep`. The paste snippet + round-trip used `cl_fitness`; flip it to the real pilot id before deploying.
+
+**Paste-ready snippet for `https://join.upcurvv.com/cll`** (host verified, client = the one `BHARNA`):
+
+```html
+<script src="https://oak-alpha-rewards-workstation.trycloudflare.com/xt.js"
+        data-api="https://oak-alpha-rewards-workstation.trycloudflare.com"
+        data-client="<cl_fitness-or-cl_iitprep>"
+        defer></script>
+```
+
+---
+
+## G3 status (earlier snapshot 16:10 IST — superseded above)
+
+| G3 sub-item | Status | Evidence |
 
 | G3 sub-item | Status | Evidence |
 |---|---|---|

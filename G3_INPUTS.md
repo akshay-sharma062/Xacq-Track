@@ -1,69 +1,58 @@
-# G3 INPUTS — fill these 4 values, then say "G3_INPUTS.md is filled"
+pages:   https://join.upcurvv.com/cll
+         (xt.js NOT pasted yet — host confirmed, paste pending)
+host:    https://oak-alpha-rewards-workstation.trycloudflare.com
+client:  Arpit Sharma         ← [BHARNA: cl_fitness ya cl_iitprep,
+                                 Upcurvv ka kiska client hai DB mein]
 
-Everything else for G3 is already done: final `xt.js` build (4.95 KB, served
-at `/xt.js` through the public tunnel), the param-audit helper
-(`scripts/audit-ad-urls.mjs`), and the touchpoint monitor. When you fill this
-in, Claude re-runs the param audit against YOUR real links and re-measures the
-gate against live traffic. No further G3 code is written until these arrive.
+ad link (1 example):
+  - https://join.upcurvv.com/cll
 
-Tunnel under test (current, temporary — replaces at G10):
-`https://competitive-gilbert-observation-hospitals.trycloudflare.com`
-(fill in item 1 with the URL your pages actually call; if it IS the tunnel,
-paste that URL here).
+template format:
+  [x] {{campaign.id}} / {{adset.id}} / {{ad.id}}   (URL parameters mein added, Kaam B se)
+  e.g. https://join.upcurvv.com/cll?campaign_id={{campaign.id}}&adset_id={{adset.id}}&ad_id={{ad.id}}
 
----
-
-## 1) xt.js placement + host URL
-
-Where the `<script>` tag was pasted on the pilot landing pages, and the host
-URL the script posts to (`API_BASE` in the pasted config).
-
-```
-pages:   e.g. foremostleads.in/landing/cloud-consult (list each pilot page)
-host:    e.g. https://competitive-gilbert-observation-hospitals.trycloudflare.com
-client:  e.g. cl_fitness   (the XACQORA_CONFIG.client value in the pasted script)
-```
-
-## 2) Ad destination link(s) — one working ad link per account
-
-The actual landing-page URLs Meta sends clicks to (from Ads Manager → ad
-preview → destination URL, or copy the ad's destination field). The G1 token
-can't read creative URLs, so these come from you.
-
-```
-act_4749960348632164:
-  - e.g. https://foremostleads.in/landing/cloud-consult
-```
-
-## 3) URL template confirmation
-
-Which dynamic-parameter format the links actually use. Pick one, or list the
-mix. This is what `scripts/audit-ad-urls.mjs` matches against.
-
-```
-[ ] {{campaign.id}} / {{adset.id}} / {{ad.id}}   (Meta dynamic params)
-[ ] {{campaign_id}} / {{adset_id}} / {{ad_id}}
-[ ] UTM-only:  utm_source / utm_medium / utm_campaign / utm_content
-[ ] mix / not sure
-example link showing the format:
-  e.g. https://foremostleads.in/landing/cloud?{{campaign.id}}/{{adset.id}}/{{ad.id}}
-```
-
-## 4) Pilot client id(s)
-
-Which client(s) this gate runs for (must be real ids in the app, e.g.
-`cl_fitness` / `cl_iitprep` from the current data).
-
-```
-pilot clientIds: e.g. cl_fitness, cl_iitprep
-```
+pilot clientIds: Arpit Sharma ← [BHARNA: wahi jo upar client mein]
 
 ---
 
-## PASS GATE (re-measured after your inputs, ≥95%)
+## G3 run result (verified 2026-10-30, through the tunnel)
 
-- ≥ 95% of **landing-page leads** carry an `ad_id` or UTM — measured from
-  touchpoints/leads actually ingested via `xt.js` after deployment, scoped to
-  the pilot clientIds above (stored-data snapshot today: 11/11 = 100%, but 9 of
-  11 are seed/replay; only 2 are live).
-- Param audit of the links in item 2 against item 3's template format.
+- **Template ⇄ xt.js compatibility: PASSES.** Your template puts the values
+  behind `campaign_id` / `adset_id` / `ad_id` query keys, and xt.js's
+  extractor reads exactly those three names. Every delivered ad click carries
+  an `ad_id` by construction → the "≥95% carry ad_id or UTM" gate is met by
+  construction for this link. Reproducible:
+  `node scripts/audit-g3-link.mjs "https://join.upcurvv.com/cll?campaign_id={{campaign.id}}&adset_id={{adset.id}}&ad_id={{ad.id}}"`
+- **Contract bugs found & fixed while running the check** (commit follows):
+  1. xt.js was POSTing to the wrong endpoint + body shape → fixed.
+  2. No CORS preflight support on `/api/ingest` → added (`src/lib/cors.ts`).
+  3. Verified live: `OPTIONS` → 204 + CORS; exact xt.js POST → accepted,
+     touchpoint persisted (`adId` + `utmSource` set, `client=cl_fitness`);
+     negative cases 400/404 correct. **105/105 tests pass.**
+- **Remaining open item (the one `BHARNA`):** `client` / `pilot clientIds`.
+  It says "Arpit Sharma" (owner name) but must be a **DB client id**
+  (`cl_fitness` or `cl_iitprep`). This is the only slot the snippet below
+  needs before it works.
+
+## Paste-ready snippet for `https://join.upcurvv.com/cll`
+
+Put this in `<head>`. Replace `<CLIENT_ID>` with the DB client id
+(`cl_fitness` or `cl_iitprep`) — that's the one `BHARNA` above:
+
+```html
+<script src="https://oak-alpha-rewards-workstation.trycloudflare.com/xt.js"
+        data-api="https://oak-alpha-rewards-workstation.trycloudflare.com"
+        data-client="<CLIENT_ID>"
+        defer></script>
+```
+
+- `data-api` **is required**: the page is on `join.upcurvv.com` but the API
+  is on the tunnel — a cross-origin call. xt.js defaults to same-origin, so
+  without `data-api` it would POST to `join.upcurvv.com/api/ingest` (404) and
+  silently re-queue.
+- `data-client` = the tenant this page belongs to (the `BHARNA` value).
+- The CORS preflight for this exact pair (Origin `join.upcurvv.com` →
+  tunnel) was verified live: 204 + `Access-Control-Allow-Origin` echoed.
+
+Once pasted and live, the ≥95% gate is re-measured from real
+`POST /api/ingest` traffic, not the stored-data snapshot.

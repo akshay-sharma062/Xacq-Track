@@ -15,26 +15,47 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { processInbound } from "@/lib/ingest";
 import { rateLimit } from "@/lib/security";
+import { corsHeaders, handlePreflight } from "@/lib/cors";
+
+/**
+ * CORS OPTIONS preflight — the browser fires this before the JSON POST when
+ * xt.js runs on a cross-origin page (spec 5.1).
+ */
+export async function OPTIONS(req: NextRequest) {
+  const preflight = await handlePreflight(req);
+  return preflight ?? new NextResponse(null, { status: 204 });
+}
 
 export async function POST(req: NextRequest) {
+  // Same origin (the app's own pages call /api/ingest) → no CORS needed.
+  // Cross-origin xt.js page → echo the Origin so the browser accepts the POST.
+  const baseHeaders: Record<string, string> = req.headers.get("origin")
+    ? corsHeaders(req)
+    : {};
+  const json = (body: unknown, status = 200, extra: Record<string, string> = {}) =>
+    new NextResponse(JSON.stringify(body), {
+      status,
+      headers: { "content-type": "application/json", ...baseHeaders, ...extra },
+    });
+
   let body: any;
   try {
     body = await req.json();
   } catch {
-    return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
+    return json({ error: "invalid JSON" }, 400);
   }
 
   const clientId: string | undefined = body?.client ?? body?.client_id;
-  if (!clientId) return NextResponse.json({ error: "client required" }, { status: 400 });
+  if (!clientId) return json({ error: "client required" }, 400);
 
   const client = await prisma.client.findUnique({ where: { id: clientId } });
-  if (!client) return NextResponse.json({ error: "unknown client" }, { status: 404 });
+  if (!client) return json({ error: "unknown client" }, 404);
 
   const rl = rateLimit(`xt:${clientId}`);
   if (!rl.ok) {
-    return NextResponse.json(
+    return json(
       { error: "rate limit exceeded — events re-queued in localStorage by xt.js" },
-      { status: 429, headers: { "Retry-After": "60" } }
+      429
     );
   }
 
@@ -52,7 +73,7 @@ export async function POST(req: NextRequest) {
     headers: { "user-agent": req.headers.get("user-agent") ?? "" },
   });
 
-  return NextResponse.json({
+  return json({
     accepted: true,
     events: res.events,
     leadIds: res.leadIds,
