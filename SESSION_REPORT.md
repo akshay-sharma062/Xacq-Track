@@ -72,6 +72,49 @@ it is scheduled.
 - Weekly 9AM summary cron + PDF (G9/G11) — pull cadence cron itself is wired,
   just not attached to a platform timer yet.
 
+## D-04 multi-account onboarding (2026-11-02) — 7/7 accessible, [REVIEW]
+**What landed:** all 7 `META_AD_ACCOUNT_IDS` onboarded with zero manual data entry —
+identity read from Meta (name/currency/`account_status`), each auto-provisioned a
+client `cl_<slug>`, full-pulled (campaigns→ad sets→ads→creatives→30-day spend
+rollup), upserted idempotently. Per-account snapshot (read-only
+`scripts/account-snapshot.ts`):
+
+| Account | name | client | currency | campaigns | ads | inrSpend |
+|---|---|---|---|---|---|---|
+| act_…535 | Piyush Ahuja | cl_piyush-ahuja | INR | 24 | 357 | ₹88,077.73 |
+| act_…2164 | Upcurvv-FML | cl_upcurvv | INR | 5 | 60 | ₹64,406.78 |
+| act_…169 | CardGenius 2 | cl_cardgenius-2 | INR | 1 | 15 | ₹32,088.97 |
+| act_…27 | FML X ABHISHEK PAL | cl_fml-x-abhishek-pal | INR | 88 | 1,565 | ₹969,109.93 |
+| act_…035 | Abhishek Pal - FML | cl_abhishek-pal-fml | INR | 69 | 1,273 | ₹1,502,324.63 |
+| act_…942 | FML New | cl_fml-new | INR | 11 | 207 | ₹169,967.79 |
+| act_…825 | The Job Workshop | cl_the-job-workshop-ad-account | AED | 93 | 331 | native AED (INR backfill pending) |
+
+Global fixed point after a clean idempotency pass: `ad=spend=creative=3808`,
+`adCampaign=291`, `adSet=1172`. Two consecutive full onboarding passes produced a
+byte-identical snapshot (the harness flagged the second as a `[duplicate]` of the
+first) — the no-double-count SNAPSHOT-REPLACE in `upsertPulled` is proven.
+
+**Verification (ticket's checklist):**
+- **7-row identity table** — all 7 `OK` (no 401/403 → no `BLOCKED: needs <perm>` rows;
+  the token reaches every account).
+- **Per-account spot-check** (fresh live `/insights` vs stored,
+  `scripts/spot-check-accounts.ts`): top-spend ad on each account, **0.000% Δ on all
+  7, worst 0.000%** — PASS GATE ≤1% cleared for every account, not just G1.
+- **Idempotency** — two full pulls, row counts unchanged (byte-identical snapshot).
+- **G1 non-regression** — `?adAccount=4749960348632164` still `cl_upcurvv`;
+  total now ₹64,406.78 (a live-window **growth**, not a re-pull double-count —
+  the 30-day rollup advanced; the SNAPSHOT-REPLACE keeps it a single window).
+- `pnpm test` **113/113** · `pnpm build` exit 0 · `git status` clean on commit.
+
+**Honest notes:**
+- **AED account** (The Job Workshop) stores native AED spend but `inrSpend=0` with
+  `fxRate` global=0: the live FX fetch (`open.er-api.com/v6/latest/AED`) was blocked
+  in the sandbox, so rows are native-only, flagged-for-backfill (spec 5.7 documented
+  fallback). Not a fake success. Fixing FX-on-machine is Dashboard-V2 §4 (next ticket).
+- A brief concurrent-writer incident (two `tsx` processes on the same SQLite file)
+  was caught and resolved: killed all writers, ran a clean single-writer pass, and
+  took before/after read-only snapshots to prove the DB is a fixed point.
+
 ## Next step (post D-01/D-02 ad-account recenter + seed purge)
 ```
 NEXT: paste the xt.js snippet on join.upcurvv.com/cll + 1 real Meta ad

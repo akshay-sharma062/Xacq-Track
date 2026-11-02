@@ -18,7 +18,7 @@
  * console.error (Sentry is wired in G10).
  */
 import { prisma } from "../lib/prisma";
-import { pullAllAccounts, normalizeAdAccountRef } from "../lib/meta/pull";
+import { pullAllAccounts, onboardAccounts, normalizeAdAccountRef } from "../lib/meta/pull";
 import { readFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -64,7 +64,16 @@ export interface PullPassResult {
   tokenPresent: boolean;
   simulateMode: boolean;
   ran: { clientId: string; account: string; spendRows: number; errors: string[] }[];
-  failures: { clientId: string; account: string; error: string }[];
+  // clientId is null when the account could not even be read (401/403 on the
+  // identity call — no client provisioned yet). permission = the Meta-named
+  // missing permission, when Meta gave one (PO: record the exact error).
+  failures: {
+    clientId: string | null;
+    account: string;
+    error: string;
+    permission?: string | null;
+    status?: number | null;
+  }[];
   skipped: string[]; // e.g. ["no META_ACCESS_TOKEN"]
 }
 
@@ -88,33 +97,14 @@ export async function runDuePulls(): Promise<PullPassResult> {
   out.tokenPresent = Boolean(token);
   const apiVersion = process.env.META_API_VERSION || "v23.0";
 
-  // Every (client, ad account) pair configured in the DB. Meta refs need the
+  // Every (client, ad account) pair already in the DB (the "known" accounts
+  // with a fixed clientId mapping — G1's cl_upcurvv, etc.). Meta refs need the
   // `act_` prefix (operators store bare numbers) — normalise on use.
   const pairs = (await prisma.adAccount.findMany({ select: { clientId: true, metaId: true } })).map((p) => ({
     ...p,
     metaId: normalizeAdAccountRef(p.metaId),
   }));
   if (pairs.length === 0) out.skipped.push("no AdAccount rows configured");
-
-  // Env-listed accounts (G1 handoff: the operator's ad account list) attach to
-  // the first client that owns one, else the first configured client.
-  const envIds = (process.env.META_AD_ACCOUNT_IDS ?? "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-  if (envIds.length && !out.simulateMode) {
-    // D-02: seed client ids are gone; env-listed accounts attach to the live
-    // Upcurvv client (the only real client post seed-purge) when no DB
-    // AdAccount pair is configured yet.
-    const firstClient = pairs[0]?.clientId ?? "cl_upcurvv";
-    for (const metaId of envIds) {
-      const ref = normalizeAdAccountRef(metaId);
-      // De-dup against DB-stored accounts (same normalised ref, any client).
-      if (!pairs.some((p) => p.metaId === ref)) {
-        pairs.push({ clientId: firstClient, metaId: ref });
-      }
-    }
-  }
 
   if (out.simulateMode) {
     out.skipped.push("META_SIMULATE=1 — scheduler runs the deterministic fixture, not the API");
@@ -124,6 +114,7 @@ export async function runDuePulls(): Promise<PullPassResult> {
   }
 
   if (token && !out.simulateMode) {
+    // (a) DB-known accounts: pull directly through their existing mapping.
     for (const p of pairs) {
       try {
         const { results, failures } = await pullAllAccounts(prisma, p.clientId, token, [p.metaId], apiVersion);
@@ -133,11 +124,63 @@ export async function runDuePulls(): Promise<PullPassResult> {
           spendRows: results.reduce((s, r) => s + r.spendRows, 0),
           errors: failures.map((f) => f.error),
         });
-        out.failures.push(...failures.map((f) => ({ clientId: p.clientId, account: p.metaId, error: f.error })));
+        out.failures.push(
+          ...failures.map((f) => ({
+            clientId: p.clientId,
+            account: p.metaId,
+            error: f.error,
+            permission: f.permission ?? null,
+            status: f.status ?? null,
+          }))
+        );
       } catch (e: any) {
         // Isolate one account's failure from the rest (spec: "alert on failures").
-        out.failures.push({ clientId: p.clientId, account: p.metaId, error: String(e?.message ?? e) });
+        out.failures.push({
+          clientId: p.clientId,
+          account: p.metaId,
+          error: String(e?.message ?? e),
+          permission: (e as any)?.permission ?? null,
+          status: (e as any)?.status ?? null,
+        });
         console.error(`[pull-scheduler] ${p.clientId}/${p.metaId}: ${e?.message ?? e}`);
+      }
+    }
+
+    // (b) D-04 multi-account onboarding: the operator's META_AD_ACCOUNT_IDS is
+    //     the "onboard these" list. Any id not already a DB AdAccount row is
+    //     read from the API, auto-provisioned (client named after the account)
+    //     and full-pulled — zero-manual. A 401/403 on identity read is
+    //     isolated as a BLOCKED row (exact Meta error + permission) and the
+    //     other accounts continue.
+    const dbRefs = new Set(pairs.map((p) => p.metaId));
+    const envIds = (process.env.META_AD_ACCOUNT_IDS ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .map(normalizeAdAccountRef)
+      .filter(Boolean);
+    const toOnboard = envIds.filter((r) => !dbRefs.has(r));
+    if (toOnboard.length) {
+      const { onboarded, blocked } = await onboardAccounts(prisma, toOnboard, token, apiVersion);
+      for (const o of onboarded) {
+        out.ran.push({
+          clientId: o.clientId,
+          account: o.metaId,
+          spendRows: o.spendRows,
+          errors: [],
+        });
+      }
+      for (const b of blocked) {
+        out.failures.push({
+          clientId: null,
+          account: b.metaId,
+          error: b.error,
+          permission: b.permission,
+          status: b.status,
+        });
+        console.error(
+          `[pull-scheduler] BLOCKED ${b.metaId} (Meta ${b.status ?? "?"}, permission ${b.permission ?? "n/a"}): ${b.error}`
+        );
       }
     }
   }

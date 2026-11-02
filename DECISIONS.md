@@ -79,3 +79,68 @@ some live clicks (≥ ~20) before it is meaningful; until then G3 status is
 
 **G3 handoff:** `G3_INPUTS.md` `client` + `pilot clientIds` = `cl_upcurvv`;
 the paste-ready snippet now carries a concrete `data-client="cl_upcurvv"`.
+
+---
+
+## D-04 — Multi-account onboarding: zero-manual, auto client-naming (2026-11-02)
+
+**Decision:** onboarding MORE Meta ad accounts is ZERO-MANUAL — the operator
+gives ad-account IDs (`META_AD_ACCOUNT_IDS`), and the app pulls everything else
+from the Meta Marketing API: identity (name / currency / `account_status`),
+the tenant structure, campaigns, ad sets, ads, creatives, daily spend.
+
+**Client naming rule (per the PO decision of 10-30):** a client is named
+after its ad-account owner. So each new account auto-creates one client
+`cl_<slugified-account-name>` (e.g. "CardGenius 2" → `cl_cardgenius-2`).
+Accounts of one business can later be merged under one client via a
+documented merge — **not done now** (today the mapping is provisional 1:1;
+the existing G1 mapping `act_4749960348632164 → cl_upcurvv` is NEVER
+re-parented).
+
+**Onboarding pipeline (enforced in `src/lib/meta/pull.ts`):**
+1. `fetchAccountIdentity(ref)` — read name/currency/status from the API
+   (zero manual entry). A 401/403 throws a structured `MetaAccessError`
+   carrying Meta's permission name.
+2. `resolveOrCreateClientForAccount(ref, …)` — idempotent tenant provisioning:
+   existing link row → reuse its client (never re-parent); otherwise create
+   `cl_<slug>` + link row. Slug collisions across distinct accounts get a
+   ref-tail suffix.
+3. `onboardAccounts(refs, token)` — the orchestrator: read identity →
+   provision → full `pullAdAccount` per account. One account's 403 is
+   isolated (recorded with the exact Meta error + permission, `blocked[]`)
+   and the others continue. A BLOCKED account is NEVER reported as
+   "onboarded" (the 0-fake-success rule).
+
+**Scheduler** (`src/jobs/pull-scheduler.ts`): `runDuePulls` now (a) pulls
+every DB-known (client, adAccount) pair through the fixed mapping, and
+(b) onboards any `META_AD_ACCOUNT_IDS` entry that has no link row yet.
+Per-account failures are isolated and surfaced with `permission`/`status`
+fields so a `BLOCKED: needs <permission>` can be recorded exactly.
+
+**Idempotency + no double-count (found + fixed this ticket):** Meta's
+no-range 30-day rollup stamps `day = date_stop`, which ADVANCES each pull.
+The `(adMetaId, day)` upsert key therefore STACKED a second overlapping
+window on re-pull (G1 grew ₹51,480.77 → ₹115,887.55 = two windows).
+`upsertPulled` now does a **SNAPSHOT REPLACE**: it deletes the account's
+previous spend snapshot before writing the new one. A re-pull is a no-op on
+row counts and never duplicates spend. The pull only reaches the delete
+after every API call succeeded, so a failed re-pull can never wipe a good
+snapshot. Proven by running the full onboarding twice — counts unchanged.
+
+**Filters:** the `?adAccount=` + Topbar selector stays DB-driven
+(`/api/session.adAccounts` lists every accessible account); the dashboard
+shows per-account spend / campaigns / ads / leads (0 until G3/G4 traffic —
+honest empty state).
+
+**Scope rule:** the 6 new accounts are G1-gate-FREE — no per-account spend
+reconciliation week yet (that's G9). This ticket's gate: entities + spend
+pulled, reports render, filters work, idempotent, G1 non-regression.
+
+**Live result (2026-11-02, [REVIEW] commit):** all 7 `META_AD_ACCOUNT_IDS`
+accessible → 7/7 onboarded, zero `BLOCKED` rows (the token reaches every
+account; no permission grants needed). Spot-check: 0.000% Δ on every account's
+top-spend ad. G1 total is now ₹64,406.78 — a live-window growth (the 30-day
+rollup advanced), kept a single window by the SNAPSHOT-REPLACE, still mapped to
+`cl_upcurvv`. One AED account ("The Job Workshop") stores native AED with
+`inrSpend=0` because the live FX fetch was sandbox-blocked — spec 5.7
+backfill, not a fake; making FX real on-machine is Dashboard-V2 §4.

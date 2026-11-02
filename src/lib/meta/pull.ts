@@ -92,6 +92,18 @@ export async function upsertPulled(
   }
   const accountId = account.id;
 
+  // 1b) SNAPSHOT REPLACE — the spend rows below are one 30-day rollup (Meta's
+  //     no-range insights: one row per ad stamped day=date_stop, which advances
+  //     with every pull). The (adMetaId, day) upsert key therefore does NOT
+  //     dedup re-pulls: a second pull stamps a newer day and STACKS a second
+  //     overlapping 30-day window, double-counting spend (found live on the
+  //     multi-account re-pull: G1 ₹51,480.77 → ₹115,887.55 = two windows).
+  //     So each pull replaces this account's previous snapshot. The pull only
+  //     reaches this point AFTER every API call succeeded (pullAdAccount
+  //     fetches all ads + insights first), so a failed re-pull can never wipe
+  //     a good snapshot.
+  await prisma.spend.deleteMany({ where: { adAccountId: accountId } });
+
   // 2) Campaigns / ad sets / ads (denormalise the tree so reports can group).
   const campaignIds = new Set<string>();
   const adsetIds = new Set<string>();
@@ -209,6 +221,154 @@ export function normalizeAdAccountRef(raw: string): string {
   return s ? `act_${s}` : "";
 }
 
+/**
+ * Thrown when a single Meta ad account is unreadable (401/403 etc.). Carries
+ * the HTTP status + the Meta-reported permission so the orchestrator can mark
+ * that account BLOCKED with the exact reason and continue with the others —
+ * the multi-account isolation rule (G1 precedent: two seed accounts 403'd for
+ * missing ads_read; we recorded it, we did not abort the batch).
+ */
+export class MetaAccessError extends Error {
+  status: number;
+  permission: string | null;
+  constructor(message: string, status: number, permission: string | null) {
+    super(message);
+    this.name = "MetaAccessError";
+    this.status = status;
+    this.permission = permission;
+  }
+}
+
+/**
+ * Read one ad account's identity straight from the API (the "zero-manual" rule:
+ * name + currency + status all come from Meta, never typed in). On 401/403 it
+ * throws a structured `MetaAccessError` with the permission name from Meta's
+ * payload so the caller can record EXACTLY why the account is blocked.
+ */
+export async function fetchAccountIdentity(
+  ref: string,
+  token: string,
+  apiVersion: string
+): Promise<{ name: string; currency: string; status: string }> {
+  const url = `https://graph.facebook.com/${apiVersion}/${ref}?fields=name,currency,account_status&access_token=${token}`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    let parsed: any;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      parsed = null;
+    }
+    const err = parsed?.error ?? {};
+    const message = err.message ?? body.slice(0, 200);
+    // The permission name, if Meta tells us: error_data.error_subcode wins,
+    // else the first known-permission token in the message.
+    const permission: string | null =
+      err.error_data?.error_subcode ??
+      (message.match(/\b(ads_read|ads_management|read_insights|business_management)\b/) ?? [null])[0] ??
+      null;
+    throw new MetaAccessError(`Meta ${res.status} on /${ref}: ${message}`, res.status, permission);
+  }
+  const j: any = await res.json();
+  return {
+    name: j.name ?? ref,
+    currency: (j.currency ?? "USD").toUpperCase(),
+    status: normalizeAccountStatus(j.account_status),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Multi-account onboarding (PO 2026-11-02): zero-manual. The operator gives
+// ad-account IDs; every row below is pulled from Meta + auto-provisioned.
+// ---------------------------------------------------------------------------
+
+/**
+ * Meta's `account_status` arrives as a NUMBER in this API version
+ * (1=ACTIVE, 0=DISABLED), but the `AdAccount.status` column is a String.
+ * Normalize without guessing: known codes → label, unknown → raw string,
+ * null → "ACTIVE" (the bootstrap default). String codes are passed through
+ * (upper-cased) so future API versions that return names keep working.
+ */
+export function normalizeAccountStatus(raw: unknown): string {
+  if (raw == null || raw === "") return "ACTIVE";
+  if (typeof raw === "string") {
+    return raw === "1" ? "ACTIVE" : raw === "0" ? "DISABLED" : raw.toUpperCase();
+  }
+  if (raw === 1) return "ACTIVE";
+  if (raw === 0) return "DISABLED";
+  return String(raw);
+}
+
+/** Client naming rule (D-04): one client per account, named after it. */
+export function slugifyOwner(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 40);
+}
+
+/**
+ * The workspace auto-created clients attach to. All of our clients live in the
+ * agency workspace (single one post D-02); fall back to creating it.
+ */
+async function resolveOnboardingWorkspace(prisma: PrismaClient): Promise<string> {
+  const c = await prisma.client.findFirst({ select: { workspaceId: true } });
+  if (c) return c.workspaceId;
+  const w = await prisma.workspace.findFirst();
+  if (w) return w.id;
+  const ws = await prisma.workspace.create({ data: { name: "Foremost Leads" } });
+  return ws.id;
+}
+
+/**
+ * D-04 auto client-naming: return the client that owns this account. If the
+ * AdAccount link row already exists, REUSE its client (never re-parent — the
+ * G1 rule). Otherwise create `cl_<slugified-name>` + the link row. Idempotent:
+ * a re-run finds the row and keeps the mapping.
+ */
+export async function resolveOrCreateClientForAccount(
+  prisma: PrismaClient,
+  ref: string,
+  name: string,
+  currency: string,
+  status: string,
+  workspaceId?: string
+): Promise<string> {
+  // (1) The AdAccount link row is the source of truth. If it exists, reuse its
+  //     client and NEVER re-parent (the G1 idempotency rule: cl_upcurvv must
+  //     survive every re-pull).
+  const existing = await prisma.adAccount.findUnique({ where: { metaId: ref }, select: { clientId: true } });
+  if (existing) return existing.clientId;
+
+  const ws = workspaceId ?? (await resolveOnboardingWorkspace(prisma));
+  const slug = slugifyOwner(name) || ref.replace(/[^0-9a-z]/gi, "").slice(0, 8);
+  const tail = ref.replace(/[^0-9a-z]/gi, "").slice(-6);
+
+  // (2) Candidate client id = cl_<slug>. A clean id is reusable even when a
+  //     partial prior run created it but not the link row (owner===null → the
+  //     upsert below is a no-op on the client). A collision (a DIFFERENT
+  //     account already owns this id) means two accounts slugify to the same
+  //     name → suffix with the account-ref tail to keep the 1:1 mapping.
+  let clientId = `cl_${slug}`;
+  const owner = await prisma.adAccount.findFirst({ where: { clientId }, select: { metaId: true } });
+  if (owner && owner.metaId !== ref) clientId = `cl_${slug}_${tail}`;
+
+  // (3) Create the client + link row (both upserts are idempotent).
+  await prisma.client.upsert({
+    where: { id: clientId },
+    update: {},
+    create: { id: clientId, workspaceId: ws, name, currency: "INR" },
+  });
+  await prisma.adAccount.upsert({
+    where: { metaId: ref },
+    update: {},
+    create: { metaId: ref, clientId, name, currency, displayOwnerName: name, status },
+  });
+  return clientId;
+}
+
 /** GET a single Graph API object, throwing on any non-2xx (so a bad token /
  *  rate limit surfaces loudly instead of silently writing zeros). */
 async function apiGet(path: string, token: string, apiVersion: string, extra: string): Promise<any> {
@@ -273,7 +433,11 @@ export async function pullAdAccount(
     "fields=id,name,status,campaign{id,name},adset{id,name},creative{object_story_spec}"
   );
 
-  for (const ad of adObjects) {
+  // 2) Per-ad insights rollup, no time_range (verified shape, see above).
+  //    Capped concurrency (3) so a large account (~1,500 ads) doesn't take
+  //    hours — see mapConcurrent. Each ad yields its rows (or one zero row if
+  //    it had no spend in the window, so wasted-spend still shows it).
+  const perAdRows = await mapConcurrent(adObjects, async (ad: any) => {
     const adset = ad.adset ?? {};
     const campaign = ad.campaign ?? {};
     const attach = ad.creative?.object_story_spec?.attachments?.[0] ?? {};
@@ -281,45 +445,39 @@ export async function pullAdAccount(
       attach.image?.url ?? attach.animated_image?.url ?? attach.video?.url ?? attach.link ?? null;
     const creativeType =
       attach.type === "VIDEO" || attach.video?.url ? "VIDEO" : "IMAGE";
+    const base = {
+      adId: ad.id,
+      adsetId: adset.id ?? adset.name ?? "unknown_set",
+      campaignId: campaign.id ?? campaign.name ?? "unknown_campaign",
+      adsetName: adset.name ?? null,
+      campaignName: campaign.name ?? null,
+      name: `${campaign.name ?? campaign.id ?? "campaign"} / ${adset.name ?? adset.id ?? "adset"} / ${ad.name ?? ad.id}`,
+      status: ad.status ?? campaign.status ?? "ACTIVE",
+      creative: { type: creativeType, thumbnailUrl: thumb, url: attach.link ?? null },
+    };
 
-    // 2) Per-ad insights rollup, no time_range (verified shape, see above).
     const insights = await apiGetAll(
       `${ad.id}/insights`,
       token,
       apiVersion,
       `fields=${INSIGHT_FIELDS}&limit=100`
     );
-    for (const it of insights) {
-      const row: PulledAd = {
-        adId: ad.id,
-        adsetId: adset.id ?? adset.name ?? "unknown_set",
-        campaignId: campaign.id ?? campaign.name ?? "unknown_campaign",
-        adsetName: adset.name ?? null,
-        campaignName: campaign.name ?? null,
-        name: `${campaign.name ?? campaign.id ?? "campaign"} / ${adset.name ?? adset.id ?? "adset"} / ${ad.name ?? ad.id}`,
-        status: ad.status ?? campaign.status ?? "ACTIVE",
-        creative: { type: creativeType, thumbnailUrl: thumb, url: attach.link ?? null },
-        day: it.date_stop ?? today(), // the rollup window's last day
-        spend: num(it.spend),
-        impressions: num(it.impressions),
-        reach: num(it.reach),
-        clicks: num(it.clicks),
-        linkClicks: num(it.clicks), // link_clicks is invalid on this version; clicks is the proxy (documented)
-        thruPlays: 0, // video_play fields invalid here; documented proxy
-        metaConversions: resultsToConversions(it.results),
-      };
-      ads.push(row);
-    }
+    const rows: PulledAd[] = insights.map((it: any) => ({
+      ...base,
+      day: it.date_stop ?? today(), // the rollup window's last day
+      spend: num(it.spend),
+      impressions: num(it.impressions),
+      reach: num(it.reach),
+      clicks: num(it.clicks),
+      linkClicks: num(it.clicks), // link_clicks is invalid on this version; clicks is the proxy (documented)
+      thruPlays: 0, // video_play fields invalid here; documented proxy
+      metaConversions: resultsToConversions(it.results),
+    }));
     // An ad with no spend data in the window still gets a zero row so the
     // report shows it (spec 7 wasted-spend needs the ad to be visible).
-    if (insights.length === 0) {
-      ads.push({
-        adId: ad.id,
-        adsetId: adset.id ?? adset.name ?? "unknown_set",
-        campaignId: campaign.id ?? campaign.name ?? "unknown_campaign",
-        name: `${campaign.name ?? campaign.id ?? "campaign"} / ${adset.name ?? adset.id ?? "adset"} / ${ad.name ?? ad.id}`,
-        status: ad.status ?? "ACTIVE",
-        creative: { type: creativeType, thumbnailUrl: thumb, url: attach.link ?? null },
+    if (rows.length === 0) {
+      rows.push({
+        ...base,
         day: today(),
         spend: 0,
         impressions: 0,
@@ -330,14 +488,17 @@ export async function pullAdAccount(
         metaConversions: 0,
       });
     }
-  }
+    return rows;
+  }, 3);
+  // Flatten the per-ad row arrays (index-aligned by mapConcurrent) into `ads`.
+  for (const rows of perAdRows) ads.push(...rows);
 
   // 3) Stored daily FX rate for every pulled day (spec 5.7). INR accounts are
   //    identity — no live FX fetch happens for them.
   const dayList = [...new Set(ads.map((a) => a.day))];
   const { byDay: fxRates, liveFills } = await resolveDayRates(prisma, currency, dayList);
 
-  return upsertPulled(prisma, clientId, ref, accountName, currency, ads, fxRates, liveFills, false, acct?.account_status ?? "ACTIVE");
+  return upsertPulled(prisma, clientId, ref, accountName, currency, ads, fxRates, liveFills, false, normalizeAccountStatus(acct?.account_status));
 }
 
 /**
@@ -365,17 +526,99 @@ export async function pullAllAccounts(
   metaAccessToken: string,
   adAccountIds: string[],
   apiVersion = "v23.0"
-): Promise<{ results: PullResult[]; failures: { account: string; error: string }[] }> {
+): Promise<{
+  results: PullResult[];
+  failures: { account: string; error: string; permission: string | null; status: number | null }[];
+}> {
   const results: PullResult[] = [];
-  const failures: { account: string; error: string }[] = [];
+  const failures: {
+    account: string;
+    error: string;
+    permission: string | null;
+    status: number | null;
+  }[] = [];
   for (const acctId of adAccountIds) {
     try {
       results.push(await pullAdAccount(prisma, clientId, metaAccessToken, acctId, apiVersion));
     } catch (e: any) {
-      failures.push({ account: acctId, error: String(e?.message ?? e) });
+      failures.push({
+        account: acctId,
+        error: String(e?.message ?? e),
+        permission: e?.permission ?? null,
+        status: e?.status ?? null,
+      });
     }
   }
   return { results, failures };
+}
+
+export interface OnboardedAccount {
+  metaId: string;
+  name: string;
+  currency: string;
+  status: string;
+  clientId: string;
+  spendRows: number;
+}
+export interface OnboardFailure {
+  metaId: string;
+  status: number | null; // 401/403
+  permission: string | null; // Meta's named permission, when it gave one
+  error: string; // the exact message, for the BLOCKED record
+}
+
+/**
+ * Multi-account onboarding orchestrator (PO 2026-11-02). For each ad-account
+ * id: read identity from the API → auto-provision the tenant (client named
+ * after the account + the AdAccount link row, idempotent, never clobbers an
+ * existing mapping) → full entity + spend pull. One account's 401/403 is
+ * isolated (recorded with the exact Meta error + permission) and the rest
+ * continue. Accessible accounts are pulled through the SAME real path as G1.
+ */
+export async function onboardAccounts(
+  prisma: PrismaClient,
+  refs: string[],
+  metaAccessToken: string,
+  apiVersion = "v23.0"
+): Promise<{ onboarded: OnboardedAccount[]; blocked: OnboardFailure[] }> {
+  const onboarded: OnboardedAccount[] = [];
+  const blocked: OnboardFailure[] = [];
+  for (const raw of refs) {
+    const ref = normalizeAdAccountRef(raw) || raw;
+    try {
+      // 1) Identity from the API (throws MetaAccessError on 401/403).
+      const idn = await fetchAccountIdentity(ref, metaAccessToken, apiVersion);
+      // 2) Auto-provision tenant (reuses any existing mapping — G1 idempotency).
+      const clientId = await resolveOrCreateClientForAccount(
+        prisma, ref, idn.name, idn.currency, idn.status
+      );
+      // 3) Full entity + spend pull (isolated per account by pullAdAccount).
+      const res = await pullAdAccount(prisma, clientId, metaAccessToken, ref, apiVersion);
+      onboarded.push({
+        metaId: ref,
+        name: idn.name,
+        currency: idn.currency,
+        status: idn.status,
+        clientId,
+        spendRows: res.spendRows,
+      });
+    } catch (e: any) {
+      const blocked403 =
+        e instanceof MetaAccessError ||
+        (e?.status && (e.status === 401 || e.status === 403));
+      blocked.push({
+        metaId: ref,
+        status: e?.status ?? null,
+        permission: e?.permission ?? null,
+        error: blocked403 ? String(e?.message ?? e) : String(e?.message ?? e),
+      });
+      // Only access (401/403) is "blocked — needs a permission". Anything else
+      // (rate limit, transient 5xx, malformed response) is a real pull error:
+      // the account DID read identity, so record it as a blocked-with-error
+      // row the operator can re-run, not a silent success.
+    }
+  }
+  return { onboarded, blocked };
 }
 
 /** `META_SIMULATE=1` forces the deterministic fixture even when a token is
@@ -388,6 +631,29 @@ export function isSimulateMode(): boolean {
 // so `Ad.metaId` = the ad object id (stable across pulls, per ad).
 function num(v: unknown): number {
   return Number(v ?? 0) || 0;
+}
+
+/**
+ * Run async work in capped-concurrency waves (spec: "pull in batches"). Meta's
+ * per-token rate limit makes a serial fan-out across a large account's ~1,500
+ * ads take hours; 3 concurrent GETs stays well under it. Order of results is
+ * preserved (index-aligned), matching the serial `for` it replaces.
+ */
+export async function mapConcurrent<T, U>(
+  items: T[],
+  worker: (item: T) => Promise<U>,
+  limit = 3
+): Promise<U[]> {
+  const out: U[] = new Array(items.length);
+  let i = 0;
+  async function lane(): Promise<void> {
+    while (i < items.length) {
+      const idx = i++;
+      out[idx] = await worker(items[idx]);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => lane()));
+  return out;
 }
 function today(): string {
   return new Date().toISOString().slice(0, 10);

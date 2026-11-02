@@ -9,11 +9,24 @@ import { AttributionModel } from "./types";
 
 const DAY_MS = 86_400_000;
 
+export interface AccountSummary {
+  metaId: string;
+  name: string;
+  currency: string;
+  status: string;
+  spendInr: number; // 30-day INR total for this account
+  campaigns: number;
+  ads: number;
+  leads: number; // client-level leads (0 until G3/G4 traffic — honest empty)
+}
+
 export interface DashboardData {
   funnel: Awaited<ReturnType<typeof funnelReport>>;
   mix: Awaited<ReturnType<typeof sourceMix>>;
   topAds: Awaited<ReturnType<typeof adPerformance>>;
   spendByDay: { label: string; value: number }[];
+  /** D-04: every ad account of the client with its spend/campaign/ads totals. */
+  accounts: AccountSummary[];
   counts: {
     leads: number;
     paid: number;
@@ -36,7 +49,7 @@ export async function dashboardFor(
   adAccountId?: string
 ): Promise<DashboardData> {
   const client = await prisma.client.findUnique({ where: { id: clientId } });
-  const [funnel, mix, topAds, spendRows, leads] = await Promise.all([
+  const [funnel, mix, topAds, spendRows, leads, accounts] = await Promise.all([
     funnelReport(prisma, clientId, 30 * DAY_MS, model, windowDays, adAccountId),
     sourceMix(prisma, clientId),
     adPerformance(prisma, clientId, 30 * DAY_MS, "ad", model, windowDays, client?.offerPrice ?? 0, adAccountId),
@@ -48,7 +61,38 @@ export async function dashboardFor(
       },
     }),
     prisma.lead.findMany({ where: { clientId } }),
+    // D-04: every ad account of the client + its 30-day spend total (INR),
+    // campaign/ad counts, and honest lead count (0 until G3/G4 traffic).
+    prisma.adAccount.findMany({
+      where: { clientId, ...(adAccountId ? { id: adAccountId } : {}) },
+      orderBy: { name: "asc" },
+      select: { metaId: true, name: true, currency: true, status: true, id: true },
+    }),
   ]);
+
+  const spendByAccount = new Map<string, number>();
+  for (const r of spendRows) spendByAccount.set(r.adAccountId, (spendByAccount.get(r.adAccountId) ?? 0) + (r.inrSpend ?? 0));
+  const leadCount = leads.length;
+  const accountRows: AccountSummary[] = [];
+  for (const a of accounts) {
+    // Counts per account (campaign/ad). Leads are client-level (a lead can be
+    // touched by ads from any account) — show the client total on each row,
+    // which is 0 pre G3/G4 (the honest empty state, D-02/D-03).
+    const [campaigns, ads] = await Promise.all([
+      prisma.adCampaign.count({ where: { adAccountId: a.id } }),
+      prisma.ad.count({ where: { adAccountId: a.id } }),
+    ]);
+    accountRows.push({
+      metaId: a.metaId,
+      name: a.name,
+      currency: a.currency,
+      status: a.status,
+      spendInr: Math.round((spendByAccount.get(a.id) ?? 0) * 100) / 100,
+      campaigns,
+      ads,
+      leads: leadCount,
+    });
+  }
 
   // Spend by day (INR), for the chart.
   const byDay = new Map<string, number>();
@@ -64,6 +108,7 @@ export async function dashboardFor(
     mix,
     topAds: topAds.slice(0, 6),
     spendByDay,
+    accounts: accountRows,
     counts: {
       leads: leads.length,
       paid: stage("Paid"),

@@ -74,6 +74,60 @@ export default async function Dashboard({
         </div>
       </div>
 
+      {/* D-04: every Meta ad account of the client + its totals. Leads are 0
+          until G3 (xt.js) / G4 (webhooks) traffic — the honest empty state. */}
+      <div className="card">
+        <SectionTitle right={<Link className="faint" href="/meta">Meta pull + CAPI →</Link>}>
+          Ad accounts ({d.accounts.length})
+        </SectionTitle>
+        <table className="tbl">
+          <thead>
+            <tr>
+              <th>Account</th>
+              <th>Currency</th>
+              <th>Status</th>
+              <th style={{ textAlign: "right" }}>Spend 30d (INR)</th>
+              <th style={{ textAlign: "right" }}>Campaigns</th>
+              <th style={{ textAlign: "right" }}>Ads</th>
+              <th style={{ textAlign: "right" }}>Leads</th>
+            </tr>
+          </thead>
+          <tbody>
+            {d.accounts.map((a) => (
+              <tr key={a.metaId}>
+                <td>
+                  <Link
+                    className="btn"
+                    href={`?adAccount=${a.metaId}${sp.client ? `&client=${sp.client}` : ""}`}
+                    style={{ textDecoration: "none", display: "inline-block" }}
+                    title={`Filter to ${a.name}`}
+                  >
+                    {a.name}
+                  </Link>
+                </td>
+                <td className="muted">{a.currency}</td>
+                <td>
+                  <span className={`badge ${a.status === "ACTIVE" ? "good" : "warn"}`}>{a.status}</span>
+                </td>
+                <td style={{ textAlign: "right" }} className="mono">{inr(a.spendInr)}</td>
+                <td style={{ textAlign: "right" }}>{a.campaigns}</td>
+                <td style={{ textAlign: "right" }}>{a.ads}</td>
+                <td style={{ textAlign: "right" }} className="faint">
+                  {a.leads === 0 ? "0 (no live traffic yet)" : a.leads}
+                </td>
+              </tr>
+            ))}
+            {d.accounts.length === 0 && (
+              <tr>
+                <td colSpan={7} className="empty">
+                  No ad accounts yet — run a Meta pull.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
       <div className="card">
         <SectionTitle right={<Link className="faint" href="/reports?key=ad_perf">Ad table →</Link>}>
           Top ads by spend (30d, last-click)
