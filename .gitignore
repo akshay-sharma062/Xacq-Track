@@ -37,6 +37,7 @@ pnpm-debug.log*
 # editor / tooling
 .idea/
 .vscode/
+.claude/
 
 # prisma migration lock (keep, but ignore local lock churn if needed)
 # (do NOT ignore prisma/migrations — commit real SQL there)

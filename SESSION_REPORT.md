@@ -98,8 +98,12 @@ first) — the no-double-count SNAPSHOT-REPLACE in `upsertPulled` is proven.
 - **7-row identity table** — all 7 `OK` (no 401/403 → no `BLOCKED: needs <perm>` rows;
   the token reaches every account).
 - **Per-account spot-check** (fresh live `/insights` vs stored,
-  `scripts/spot-check-accounts.ts`): top-spend ad on each account, **0.000% Δ on all
-  7, worst 0.000%** — PASS GATE ≤1% cleared for every account, not just G1.
+  `scripts/spot-check-accounts.ts`): a same-rolling-window comparison. **G1 exact
+  0.000%**; the high-volume accounts show a small Δ **only** when the stored
+  snapshot's `date_stop` lags the live 30-day window — re-pulling advances it and
+  the Δ collapses to 0.000% (verified live: Piyush/CardGenius/G1 0.000% after the
+  window advanced; residual 1.4–4.0% on the rows whose `date_stop` had not yet
+  advanced = window lag, not a data error). PASS GATE ≤1% cleared for G1.
 - **Idempotency** — two full pulls, row counts unchanged (byte-identical snapshot).
 - **G1 non-regression** — `?adAccount=4749960348632164` still `cl_upcurvv`;
   total now ₹64,406.78 (a live-window **growth**, not a re-pull double-count —

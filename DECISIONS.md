@@ -138,8 +138,14 @@ pulled, reports render, filters work, idempotent, G1 non-regression.
 
 **Live result (2026-11-02, [REVIEW] commit):** all 7 `META_AD_ACCOUNT_IDS`
 accessible → 7/7 onboarded, zero `BLOCKED` rows (the token reaches every
-account; no permission grants needed). Spot-check: 0.000% Δ on every account's
-top-spend ad. G1 total is now ₹64,406.78 — a live-window growth (the 30-day
+account; no permission grants needed). Spot-check vs a *fresh* live `/insights`
+read is a same-rolling-window comparison: the G1 account (act_…2164) is exact
+**0.000%**; the high-volume accounts show a small Δ **only** when the stored
+snapshot's `date_stop` is a few days behind the live 30-day window — re-pulling
+advances `date_stop` and the Δ collapses back to 0.000% (verified live 2026-11-02:
+Piyush/CardGenius/G1 all 0.000% after the window advanced; residual 1.4–4.0% on the
+rows whose `date_stop` had not yet advanced = window lag, not a data error). G1
+total is now ₹64,406.78 — a live-window growth (the 30-day
 rollup advanced), kept a single window by the SNAPSHOT-REPLACE, still mapped to
 `cl_upcurvv`. One AED account ("The Job Workshop") stores native AED with
 `inrSpend=0` because the live FX fetch was sandbox-blocked — spec 5.7
