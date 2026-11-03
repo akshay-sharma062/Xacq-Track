@@ -14,6 +14,10 @@ data/
 *.sqlite
 *.sqlite-journal
 *.db
+# SQLite WAL sidecars (dev.db in WAL mode) — must never be committed
+*.db-shm
+*.db-wal
+*.db-journal
 
 # generated prisma client
 src/generated/
