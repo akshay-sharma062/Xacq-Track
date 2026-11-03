@@ -17,6 +17,7 @@
     "xt:build": "node xt/build.mjs",
     "jobs:pull": "tsx src/jobs/pull-scheduler.ts",
     "pull:once": "tsx src/jobs/pull-scheduler.ts once",
+    "pull:fast": "tsx src/jobs/pull-scheduler.ts fast",
     "meta:verify-token": "node scripts/verify-meta-token.mjs"
   },
   "engines": {

@@ -53,6 +53,23 @@ export async function resolveClient(
   return visible.length === 1 ? visible[0] : visible[0] ?? null;
 }
 
+/**
+ * Dashboard-V2 §1: "All spend-family reports + KPIs accept 'All' (no client /
+ * adAccount param = all visible to the role)." Resolve the client SET a request
+ * targets: an explicit `client` in the visible set → that one; "all" or no param
+ * → the whole visible set (the aggregate view). The spend-family report route
+ * aggregates across this set; per-client drill-down still passes a single id.
+ */
+export async function resolveClientSet(
+  session: Session,
+  requested?: string | null
+): Promise<string[]> {
+  const visible = await visibleClients(session);
+  if (visible.length === 0) return [];
+  if (requested && requested !== "all") return visible.includes(requested) ? [requested] : [];
+  return visible; // "all" or absent → aggregate across everything visible
+}
+
 /** Quick webhook status counts for the integrations hub screen. */
 export async function webhookStats(clientId?: string) {
   const where = { ...(clientId ? { clientId } : {}) };

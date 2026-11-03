@@ -19,6 +19,8 @@
  */
 import { prisma } from "../lib/prisma";
 import { pullAllAccounts, onboardAccounts, normalizeAdAccountRef } from "../lib/meta/pull";
+import { backfillMissingInr, BackfillResult } from "../lib/fx-store";
+import { acquirePullLock, releasePullLock } from "./pull-lock";
 import { readFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -189,6 +191,63 @@ export async function runDuePulls(): Promise<PullPassResult> {
 }
 
 // ---------------------------------------------------------------------------
+// 10-minute fast tick (Dashboard-V2 §3): refresh the day's data + re-try FX,
+// single-writer (a running tick is skipped, never parallelized). On this API
+// version Meta's no-range rollup is the "daily" granularity (time_range 400s on
+// the G1 account — documented G1 limitation), so the fast tick refreshes that
+// rollup; it additionally re-runs the multi-source FX fetch + backfill so the
+// AED "INR backfill pending" rows clear the moment a source is reachable.
+// ---------------------------------------------------------------------------
+export interface FastTickResult {
+  lock: { acquired: boolean; reason: string };
+  skipped: string[];
+  pulled: { ran: number; failures: number };
+  fx: { updatedRows: number; rates: { currency: string; day: string; rate: number; source: string | null }[] };
+}
+
+/**
+ * One 10-min tick. Acquires the single-writer pull lock (skip if a pull is
+ * already running — the idempotency-lesson discipline), then runs a pull pass
+ * over every accessible account + a FX re-fetch/backfill. `lockPath`/`pid` are
+ * injectable so the lock test drives it hermetically without live Meta.
+ */
+export async function runFastTick(
+  opts: { lockPath?: string; pid?: number } = {}
+): Promise<FastTickResult> {
+  const lock = acquirePullLock({ lockPath: opts.lockPath, pid: opts.pid });
+  if (!lock.acquired) {
+    return {
+      lock,
+      skipped: [`fast tick skipped — ${lock.reason}`],
+      pulled: { ran: 0, failures: 0 },
+      fx: { updatedRows: 0, rates: [] },
+    };
+  }
+  try {
+    const res = await runDuePulls();
+    const fx: BackfillResult = await backfillMissingInr(prisma);
+    return {
+      lock,
+      skipped: res.skipped,
+      pulled: { ran: res.ran.length, failures: res.failures.length },
+      fx: { updatedRows: fx.updatedRows, rates: fx.rates },
+    };
+  } finally {
+    releasePullLock({ lockPath: opts.lockPath, pid: opts.pid });
+  }
+}
+
+/** Pure: is a 10-min fast tick due at `nowMs`, given the last-fire time? Fires
+ *  on a fixed 10-min grid (deterministic, no drift) — the resident loop uses it. */
+export function fastTickDue(lastFiredMs: number | null, nowMs: number): boolean {
+  const GRID = 10 * 60_000;
+  if (lastFiredMs === null) return true; // never fired → fire now
+  // The next grid boundary after `lastFiredMs` is due by `nowMs`.
+  const nextSlot = Math.floor(lastFiredMs / GRID) * GRID + GRID;
+  return nowMs >= nextSlot;
+}
+
+// ---------------------------------------------------------------------------
 // Resident loop (local/dev). Fires each cadence slot at most once per day.
 // ---------------------------------------------------------------------------
 export function startLoop(): { stop: () => void } {
@@ -229,11 +288,42 @@ export function startLoop(): { stop: () => void } {
   };
 }
 
-// CLI entry: `pnpm jobs:pull` → resident loop; `pnpm pull:once` → one pass.
+// Resident fast-tick loop (Dashboard-V2 §3): fire `runFastTick()` on a fixed
+// 10-min grid while the process is up. Shares the same single-writer lock as
+// the pull, so a manual `pull:fast` / durable cron and this loop never
+// parallelize — one of them skips.
+export function startFastLoop(): { stop: () => void } {
+  let lastFired: number | null = null;
+  console.log("[pull-scheduler] fast tick: every 10 min (fast tick + FX re-fetch), single-writer lock");
+  const tick = async () => {
+    const now = Date.now();
+    if (!fastTickDue(lastFired, now)) return;
+    lastFired = now;
+    const res = await runFastTick();
+    console.log(
+      `[pull-scheduler] fast tick ${res.lock.acquired ? "ran" : "skipped"}: pulled ${res.pulled.ran}/${res.pulled.failures} fail, fx backfilled ${res.fx.updatedRows} rows`
+    );
+  };
+  const timer = setInterval(() => void tick(), 60_000);
+  void tick();
+  return {
+    stop: () => {
+      clearInterval(timer);
+      console.log("[pull-scheduler] fast tick stopped");
+    },
+  };
+}
+
+// CLI entry: `pnpm jobs:pull` → resident loop; `pnpm pull:once` → one pass;
+// `pnpm pull:fast` → one 10-min fast tick (pull + FX backfill), lock-guarded.
 const isMain = process.argv[1]?.endsWith("pull-scheduler.ts") ?? false;
 if (isMain) {
   loadDotEnv(); // .env for a bare tsx process (Next.js would do this for routes).
-  const mode = process.argv.includes("once") ? "once" : "loop";
+  const mode = process.argv.includes("once")
+    ? "once"
+    : process.argv.includes("fast")
+      ? "fast"
+      : "loop";
   if (mode === "once") {
     runDuePulls()
       .then((r) => {
@@ -244,7 +334,18 @@ if (isMain) {
         console.error(e);
         process.exit(1);
       });
+  } else if (mode === "fast") {
+    runFastTick()
+      .then((r) => {
+        console.log(JSON.stringify(r, null, 2));
+        process.exit(r.lock.acquired ? 0 : 0);
+      })
+      .catch((e) => {
+        console.error(e);
+        process.exit(1);
+      });
   } else {
-    startLoop(); // keeps the process alive
+    startLoop(); // hourly/nightly cadence
+    startFastLoop(); // 10-min fast tick + FX (both keep the process alive)
   }
 }

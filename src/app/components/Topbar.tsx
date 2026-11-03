@@ -36,7 +36,9 @@ export function Topbar({ title, crumb }: { title: string; crumb?: string }) {
   const [clients, setClients] = useState<{ id: string; name: string }[]>([]);
   const [adAccounts, setAdAccounts] = useState<AdAccountOption[]>([]);
 
-  const clientId = sp.get("client") ?? "";
+  // Dashboard-V2 §1: "All clients" is the DEFAULT (value "all"); a specific
+  // client id drills down. Same DB-driven option set (no hardcoding).
+  const clientId = sp.get("client") ?? "all";
   const adAccountId = sp.get("adAccount") ?? "";
 
   useEffect(() => {
@@ -61,7 +63,8 @@ export function Topbar({ title, crumb }: { title: string; crumb?: string }) {
   }
   function switchClient(id: string) {
     const next = new URLSearchParams(sp.toString());
-    if (id) next.set("client", id);
+    // "all" (or empty) = the All-clients default view; a specific id drills in.
+    if (id && id !== "all") next.set("client", id);
     else next.delete("client");
     // Switching client re-scopes the ad-account list, so drop the ad-account
     // filter (it is client-specific) to avoid a stale `?adAccount=`.
@@ -87,7 +90,7 @@ export function Topbar({ title, crumb }: { title: string; crumb?: string }) {
           onChange={(e) => switchClient(e.target.value)}
           style={{ minWidth: 160 }}
         >
-          <option value="">Client (default)</option>
+          <option value="all">All clients (default)</option>
           {clients.map((c) => (
             <option key={c.id} value={c.id}>
               {c.name}

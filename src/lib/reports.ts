@@ -398,6 +398,107 @@ export async function resolveAdAccountId(
   return acct?.id;
 }
 
+/** §1 "All" ad-account resolver: the ?adAccount= metaId → row id, but verified
+ *  against ANY client in the requested SET (the aggregate view), not one. */
+export async function resolveAdAccountIdInSet(
+  prisma: PrismaClient,
+  clientIds: string[],
+  metaId: string | null | undefined
+): Promise<string | undefined> {
+  if (!metaId || clientIds.length === 0) return undefined;
+  const acct = await prisma.adAccount.findFirst({
+    where: { metaId, clientId: { in: clientIds } },
+    select: { id: true },
+  });
+  return acct?.id;
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard-V2 §1 — the "All clients / All ad accounts" aggregate. Each report
+// already runs per-client; the All view runs them across the visible set and
+// SUMS the additive figures (spend, leads, sales, counts). Rate/derived fields
+// (cost-per, ROI, ROAS) are recomputed from the sums, not summed — so the
+// aggregate is mathematically correct, never a fake.
+// ---------------------------------------------------------------------------
+
+/** Sum a set of funnel reports into one All-accounts funnel. */
+export function sumFunnel(rows: FunnelReport[], label = "All clients"): FunnelReport {
+  const s = {
+    spendInr: 0, spendNative: 0, leads: 0, registered: 0, attended: 0,
+    callsBooked: 0, sales: 0, revenueInr: 0, refundsInr: 0,
+  };
+  for (const r of rows) {
+    s.spendInr += r.spendInr; s.spendNative += r.spendNative; s.leads += r.leads;
+    s.registered += r.registered; s.attended += r.attended; s.callsBooked += r.callsBooked;
+    s.sales += r.sales; s.revenueInr += r.revenueInr; s.refundsInr += r.refundsInr;
+  }
+  const ref = rows[0];
+  const net = s.revenueInr;
+  return {
+    client: label,
+    attribution: ref?.attribution ?? { model: "last_paid_click", windowDays: 30 },
+    spendInr: round(s.spendInr), spendNative: round(s.spendNative),
+    leads: s.leads, registered: s.registered, attended: s.attended,
+    callsBooked: s.callsBooked, sales: s.sales,
+    revenueInr: round(net), refundsInr: round(s.refundsInr),
+    costPerLead: s.leads ? round(s.spendInr / s.leads) : 0,
+    costPerRegistrant: s.registered ? round(s.spendInr / s.registered) : 0,
+    costPerAttendee: s.attended ? round(s.spendInr / s.attended) : 0,
+    costPerCall: s.callsBooked ? round(s.spendInr / s.callsBooked) : 0,
+    costPerSale: s.sales ? round(s.spendInr / s.sales) : 0,
+    showUpRate: s.registered ? s.attended / s.registered : 0,
+    closeRate: s.callsBooked ? s.sales / s.callsBooked : 0,
+    roi: s.spendInr ? (net - s.spendInr) / s.spendInr : 0,
+  };
+}
+
+/** Concat + spend-rerank a set of ad-performance tables. */
+export function sumAdPerf(rows: AdPerfRow[]): AdPerfRow[] {
+  const seen = new Map<string, AdPerfRow>();
+  for (const r of rows.flat()) {
+    const prev = seen.get(r.adId);
+    if (!prev || r.spendInr > prev.spendInr) seen.set(r.adId, r);
+  }
+  return [...seen.values()].sort((a, b) => b.spendInr - a.spendInr);
+}
+
+/** Sum a set of source-mix reports. */
+export function sumSourceMix(rows: SourceMix[]): SourceMix {
+  const s = { instantForm: 0, landingPage: 0, organic: 0, unknown: 0, total: 0 };
+  for (const r of rows) {
+    s.instantForm += r.instantForm; s.landingPage += r.landingPage;
+    s.organic += r.organic; s.unknown += r.unknown; s.total += r.total;
+  }
+  return s;
+}
+
+/** Concat a set of meta-vs-track rows (one per ad, no cross-client dedup
+ *  needed — ad ids are globally unique). */
+export function sumMetaVsTrack(rows: MetaVsTrackRow[]): MetaVsTrackRow[] {
+  return rows.flat();
+}
+
+/** Concat + spend-rerank a set of wasted-spend tables. */
+export function sumWasted(rows: WastedRow[]): WastedRow[] {
+  const seen = new Map<string, WastedRow>();
+  for (const r of rows.flat()) {
+    const prev = seen.get(r.adId);
+    if (!prev || r.spendInr > prev.spendInr) seen.set(r.adId, r);
+  }
+  return [...seen.values()].sort((a, b) => b.spendInr - a.spendInr);
+}
+
+/** Sum a set of new-vs-old reports. */
+export function sumNewVsOld(rows: NewVsOld[]): NewVsOld {
+  const s = { newSales: 0, newRevenueInr: 0, oldSales: 0, oldRevenueInr: 0, newLeadIds: [] as string[], oldLeadIds: [] as string[] };
+  for (const r of rows) {
+    s.newSales += r.newSales; s.newRevenueInr += r.newRevenueInr;
+    s.oldSales += r.oldSales; s.oldRevenueInr += r.oldRevenueInr;
+    s.newLeadIds.push(...r.newLeadIds); s.oldLeadIds.push(...r.oldLeadIds);
+  }
+  return s;
+}
+
 export async function weeklySummary(
   prisma: PrismaClient,
   clientId: string,

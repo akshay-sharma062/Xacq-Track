@@ -150,3 +150,51 @@ rollup advanced), kept a single window by the SNAPSHOT-REPLACE, still mapped to
 `cl_upcurvv`. One AED account ("The Job Workshop") stores native AED with
 `inrSpend=0` because the live FX fetch was sandbox-blocked — spec 5.7
 backfill, not a fake; making FX real on-machine is Dashboard-V2 §4.
+
+## D-05 — Dashboard V2: All-default view + 10-min autopull + real FX + dense dashboard (2026-11-02)
+
+PO decision 2026-11-02. One decision, four coupled pieces — recorded together
+because they ship as one [REVIEW]:
+
+**1. All-clients / All-accounts default (§1).** Every filter + report screen
+now defaults to the AGGREGATE view: `?client=` absent or `all` → the whole
+visible client set; `?adAccount=` absent → all ad accounts. `resolveClientSet`
+(`api-utils`) resolves the set; the dense dashboard (`dashboardAll`) and every
+spend-family report (`/api/reports`) aggregate across it — sums for the
+additive figures, recomputed rates for cost-per/ROI/ROAS (never sum rates).
+Per-client / per-account drill-down is unchanged (a specific `?client=` or
+`?adAccount=` scopes to it). Both selectors stay DB-driven — adding account #8
+in `.env` makes it appear with zero UI change.
+
+**2. 10-minute fast tick + single-writer lock (§3).** A new `runFastTick()`
+refreshes the day's data every 10 min (`pnpm pull:fast`, or the resident
+`startFastLoop()`); it re-tries the FX fetch + backfill in the same tick.
+Discipline from the idempotency incident: **one pull process at a time** —
+`acquirePullLock` (a cross-process file lock, `src/jobs/pull-lock.ts`) makes a
+running tick SKIP, never parallelize. A 30-min TTL so a dead holder can't
+wedge the pipeline. Lock test included (`test/pull-lock.test.ts`). The 3-hourly
+entity tick is folded into the 10-min cadence (recorded call, PO allowed either).
+
+**3. Real multi-source FX + backfill (§4).** `fetchLiveFxRate` tries
+`open.er-api.com → frankfurter.dev → exchangerate.host` (each env-overridable,
+source recorded on the FxRate row). If all three are unreachable it returns the
+exact three error strings — **never a hardcoded rate**. `backfillMissingInr`
+re-converts the stored native-only rows (`inrRate=0`) once a rate lands. LIVE
+on this machine: AED→INR fetched at **25.849976** (source #1), the "The Job
+Workshop" AED account backfilled to **₹384,113.82** INR. (Also fixed a real
+`.env` bug: `FX_API_BASE` had a stray inline comment + embedded quotes that
+were silently breaking source #1's URL — that was the honest root cause of the
+earlier "FX blocked" state.)
+
+**4. Dense dashboard + 60 s auto-refresh (§2/§3b).** The dashboard's default
+render is now information-dense off the G1 pulls: aggregate KPI row (per-
+currency + INR), 7 per-account cards (last-pulled + spot-check Δ), daily
+spend chart, top campaigns, top ads (thumbnail), CAPI send-status strip
+(honest 0s until G8), and a sync/FX strip with the "Data as of" stamp. The
+client polls `/api/session` every 60 s → server-component refresh (no Meta
+calls from the browser). A 0 in the leads-family is labelled
+"AWAITING LIVE TRAFFIC (G3/G4)" — honest, not a fake.
+
+**Scope rule:** nothing here deletes a real pull row; seed stays tenancy-only
+(D-02 stands). Money display + scheduler paths → [REVIEW].
+

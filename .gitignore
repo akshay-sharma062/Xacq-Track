@@ -39,5 +39,10 @@ pnpm-debug.log*
 .vscode/
 .claude/
 
+# pull-scheduler runtime lock (single-writer, Dashboard-V2 §3) — never commit
+.xacqora-pull.lock
+# local scratch / evidence files
+.tmp-*
+
 # prisma migration lock (keep, but ignore local lock churn if needed)
 # (do NOT ignore prisma/migrations — commit real SQL there)

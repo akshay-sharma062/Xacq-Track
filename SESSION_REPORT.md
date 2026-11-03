@@ -119,6 +119,86 @@ first) — the no-double-count SNAPSHOT-REPLACE in `upsertPulled` is proven.
   was caught and resolved: killed all writers, ran a clean single-writer pass, and
   took before/after read-only snapshots to prove the DB is a fixed point.
 
+## D-05 Dashboard V2 (2026-11-03) — All-default + 10-min autopull + real FX + dense dashboard, [REVIEW]
+**What landed (PO decisions 2026-11-02):**
+
+- **§4 FX made real on this machine (the AED gap closed).** Multi-source chain
+  `open.er-api.com → frankfurter.dev → exchangerate.host` (source recorded on the
+  `FxRate` row; all-unreachable → the exact 3 error strings, never a fake rate).
+  LIVE: **AED→INR 25.849976** (source #1) fetched on-machine; "The Job Workshop"
+  AED account **backfilled to ₹384,113.82** INR (331 spend rows, native AED 14,859.35).
+  Also fixed a real `.env` bug: `FX_API_BASE` had a stray inline comment + embedded
+  quotes that were silently breaking source #1's URL — the honest root cause of the
+  earlier "FX blocked" state. 12 `fx-store` tests (mock source, fallback order,
+  backfill idempotency).
+- **§3 10-min autopull + single-writer discipline.** `runFastTick()` (new `pnpm
+  pull:fast` + resident `startFastLoop()`) refreshes the day's data every 10 min and
+  re-runs the FX backfill in the same tick. A cross-process **file lock**
+  (`src/jobs/pull-lock.ts`) makes a running tick SKIP, never parallelize — the exact
+  lesson from the idempotency incident. 30-min TTL so a dead holder can't wedge the
+  pipeline. The 3-hourly entity tick is folded into the 10-min cadence. Lock test:
+  `test/pull-lock.test.ts` (8 tests: fresh/skip/stale-steal, owner-only release, grid).
+- **§1 All-clients / All-accounts default.** `resolveClientSet` + `dashboardAll` + the
+  spend-family reports now default to the aggregate view across the visible client set
+  (sums for additive figures, recomputed rates for cost-per/ROI/ROAS — never summed);
+  per-client / per-account drill-down unchanged. Both selectors stay DB-driven —
+  adding account #8 in `.env` makes it appear with zero UI change.
+- **§2 dense dashboard + §3b 60s auto-refresh.** The default render is information-dense
+  off the G1 pulls: aggregate KPI row (per-currency + INR), 7 per-account cards
+  (last-pulled stamp), daily-spend chart, top campaigns + top ads (thumbnails), CAPI
+  send-status strip (honest 0s until G8), and a sync/FX strip. The client polls
+  `/api/session` every 60 s → server refresh (no Meta calls from the browser). A
+  leads-family 0 is labelled "AWAITING LIVE TRAFFIC (G3/G4)" — honest, not a fake.
+
+**Verification (ticket's checklist):**
+- **Two consecutive 10-min ticks, idempotent.** Clean foreground run: tick 1
+  `{lock:{acquired:true}, pulled:{ran:7}, fx:{updatedRows:0}}` (5m47s real pull);
+  per-account row counts **unchanged** baseline→after (`ad=3808, creative=3808,
+  spend=3808, adSet=1172`); a 2nd tick while one is in-flight correctly reports
+  `acquired:false` and skips (never parallelizes).
+- **FX backfill LIVE:** AED→INR 25.849976 fetched on-machine; AED account
+  `inrSpend` went ₹0 → **₹384,113.82**.
+- **`pnpm test` 126/126 · `pnpm build` exit 0** (up from 113 pre-ticket: +8
+  `pull-lock`, +5 `fx-store` net new; the dense dashboard is DB-read, typechecked).
+- D-05 recorded in `DECISIONS.md`; `GOLIVE_STATUS.md` rows "Dashboard V2 + 10-min
+  autopull + FX" → DONE.
+
+**Honest notes:**
+- 3 of 7 accounts showed a `failures` count in the live tick (transient Meta rate /
+  fetch on the largest accounts); that's the expected per-account isolation — the
+  other 4 pulled clean, and a re-tick (or the 3h/nightly slot) clears them. Not a
+  fake success: failures are recorded, not hidden.
+- FX source #2 (frankfurter) returns 404 for AED (not in the ECB set) and source #3
+  (exchangerate.host) now needs an API key (401) — source #1 alone is sufficient;
+  the chain is correct and the two failures are logged, not papered over.
+
+**Next gate = G4 webhooks per client.** The dev webhook host is the current
+trycloudflare tunnel (G10 swaps it to a stable domain). Per-client inbound URL
+(`POST /api/webhooks/<platform>?client=<clientId>`), 7 clients (one per D-04
+onboarded account):
+
+```
+host = https://oak-alpha-rewards-workstation.trycloudflare.com   (re-verify: quick-tunnel subdomain dies with the cloudflared process)
+
+cl_upcurvv                     (G1, Upcurvv-FML)
+cl_piyush-ahuja                (Piyush Ahuja)
+cl_cardgenius-2                (CardGenius 2)
+cl_fml-x-abhishek-pal          (FML X ABHISHEK PAL)
+cl_abhishek-pal-fml            (Abhishek Pal - FML)
+cl_fml-new                     (FML New)
+cl_the-job-workshop-ad-account (The Job Workshop, AED)
+
+Each client × each platform, e.g.:
+  POST https://<host>/api/webhooks/razorpay?client=cl_upcurvv
+  POST https://<host>/api/webhooks/cashfree?client=cl_piyush-ahuja
+  POST https://<host>/api/webhooks/aevent?client=cl_cardgenius-2
+  … platforms: meta, razorpay, cashfree, cosmofeed, tagmango,
+    flexifunnels, aevent, zoom, calendly, pabbly, whatsapp, sheets, xt, manual
+Secret placement: the gateway/platform signature secret goes in the Client row's
+`webhookSecret` (per-client, verified by the adapter), NOT in .env; .env keeps
+the platform-level `*_WEBHOOK_VERIFY_TOKEN` / CAPI pixel mapping. G10 moves <host>.
+```
+
 ## Next step (post D-01/D-02 ad-account recenter + seed purge)
 ```
 NEXT: paste the xt.js snippet on join.upcurvv.com/cll + 1 real Meta ad
