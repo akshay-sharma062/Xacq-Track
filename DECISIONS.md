@@ -198,3 +198,53 @@ calls from the browser). A 0 in the leads-family is labelled
 **Scope rule:** nothing here deletes a real pull row; seed stays tenancy-only
 (D-02 stands). Money display + scheduler paths → [REVIEW].
 
+## D-06 — G4 webhooks per client: host-agnostic routing + per-client signature secret (2026-11-03)
+
+The G4 gate: one inbound webhook URL per client per platform
+(`POST /api/webhooks/<platform>?client=<clientId>`) across all 7 D-04 clients,
+with the signature/secret verified per client. The route was already
+host-agnostic (client via `?client=`, platform via path); G4 makes that **real
+and reconciled for every (client × platform) combo**, and adds the per-client
+signature secret that the D-05 closeout flagged as the missing wiring step.
+
+**Routing reconciliation (work 1).** `POST /api/webhooks/<platform>?client=<id>`
+now proven across **7 clients × 5 G4 payment platforms = 35 routes, 35/35
+accepted** (a locally-replayed, correctly-signed provider-shaped event through
+the real HTTP route — `scripts/g4-replay.ts`, re-runnable). Each platform's
+adapter `verify` ran against the client's `webhookSecret`: Razorpay
+(`x-razorpay-signature` HMAC over the raw body), Cashfree
+(`cf-signature` HMAC over `${cf-timestamp}:${body}`), Cosmofeed/TagMango/
+FlexiFunnels (shared `x-webhook-secret`). A **bad signature 502s** (reject),
+not a fake accept. Meta's `hub.challenge` handshake was verified **per client
+(7/7 echo the challenge; a wrong token 403s)**.
+
+**Per-client signature secret (the G4 wiring step).** G4 provisions each client
+with its own `Client.webhookSecret` (the value the adapter verifies against).
+`.env` is NOT the home for it — it lives on the Client row (per-client, per the
+D-05 closeout + spec 10). The harness provisions all 7 (values never printed).
+No gateway API keys exist in `.env`, so **real provider-side traffic is
+BLOCKED** for the 5 G4 platforms (recorded with exact reason per platform,
+never faked) — the replay proves the app-side routing/verify/ingest is ready;
+only the provider→our-inbound hop awaits a real gateway webhook.
+
+**Bug found + fixed by the G4 replay (the 12/35 that would otherwise 502).**
+`OutboundEvent.eventId` is `@unique` and was stored as `dedupKey.slice(0,64)`.
+Two CAPI Purchase events for the **same lead across different gateways** share
+a `Purchase:<client>:<phone>:<txn…>` prefix, so their 64-char truncations
+collided on the `@unique eventId` column → the second `create` 502'd. The send
+path keys on `dedupKey` (already `@unique`), so `eventId` is a redundant
+idempotency mirror. **Fix (`src/lib/ingest.ts`): store the full, already-unique
+`dedupKey` as `eventId` — no truncation.** Regression test
+`test/ingest.test.ts` "one lead paying through two gateways …" locks it (both
+events land, distinct dedup + event ids). 127/127 tests, build exit 0.
+
+**Dashboard flip (work 3).** A full-funnel replay (Meta lead → registered →
+webinar_joined → call_booked → a paid gateway) under a client flips the
+leads-family KPIs from 0 ("AWAITING LIVE TRAFFIC (G3/G4)") to live counts. The
+flip is real DB reads at request time — the source is stated honestly as
+locally-replayed events, not live provider traffic.
+
+**Scope rule:** host-agnostic (the dead quick-tunnel host is a G10 concern, not
+G4's — the route works on any host). No G1/D-04 pull row is touched; G4 writes
+only ingest rows. Webhook path + CAPI + per-client permission → [REVIEW].
+

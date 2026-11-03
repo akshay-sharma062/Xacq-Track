@@ -358,7 +358,14 @@ async function processRecord(
           clientIp: identity.clientIp ?? null,
           userAgent: identity.userAgent ?? null,
           eventTime: event.timestamp,
-          eventId: dedupKey.slice(0, 64),
+          // idempotency key = the full CAPI dedup key (already globally @unique).
+          // G4 replay found: the previous `dedupKey.slice(0, 64)` is lossy — two
+          // CAPI events for the SAME lead across different gateways share a
+          // `Purchase:<client>:<phone>:<txn…>` prefix, so their 64-char
+          // truncations collided on the @unique eventId column and 502'd. Store
+          // the full key instead (dedupKey is already unique; eventId is a
+          // redundant idempotency mirror, never read by the send path).
+          eventId: dedupKey,
           dedupKey,
           status: kind === "Refund" ? "skipped" : "queued", // refunds are notes, not sends (spec 5.8)
           matchQuality: estimateMatchQuality(identity),

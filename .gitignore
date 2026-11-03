@@ -46,3 +46,6 @@ pnpm-debug.log*
 
 # prisma migration lock (keep, but ignore local lock churn if needed)
 # (do NOT ignore prisma/migrations — commit real SQL there)
+
+# G4 scratch evidence
+.g4-evidence.txt

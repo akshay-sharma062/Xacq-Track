@@ -199,6 +199,47 @@ Secret placement: the gateway/platform signature secret goes in the Client row's
 the platform-level `*_WEBHOOK_VERIFY_TOKEN` / CAPI pixel mapping. G10 moves <host>.
 ```
 
+## G4 — webhooks per client (D-06, 2026-11-03) [REVIEW]
+**Gate:** one inbound webhook URL per client per platform
+(`POST /api/webhooks/<platform>?client=<clientId>`) across all 7 D-04 clients,
+signature/secret verified per client. The route was already host-agnostic; G4
+makes it **reconciled + signed for every (client × platform) combo**.
+
+**Verification (all via `scripts/g4-replay.ts` against the live route, re-runnable):**
+- **Work 1 — routing:** 7 clients × 5 G4 payment platforms (razorpay, cashfree,
+  cosmofeed, tagmango, flexifunnels) = **35/35 accepted** through the real HTTP
+  route; each platform's `verify` ran against that client's `Client.webhookSecret`
+  (HMAC for Razorpay/Cashfree, shared-secret for the rest). **Meta `hub.challenge`
+  handshake: 7/7 echo the challenge per client; a wrong token → 403.**
+- **Work 2 — replay + BLOCKED:** one locally-replayed, correctly-signed provider
+  event per G4 platform lands (events/payments/capi all 1, dedup 3× replay = no
+  double-count, bad signature → 502 reject). Each platform's **real provider-side
+  hop is BLOCKED** (no gateway API key in `.env` — recorded with the exact reason
+  per platform, never faked). The per-client `webhookSecret` is now set on all 7,
+  ready to point a real gateway at.
+- **Work 3 — dashboard flip:** a full-funnel replay (Meta lead → registered →
+  webinar_joined → call_booked → a paid gateway) under `cl_upcurvv` flips the
+  leads-family KPIs from 0 ("AWAITING LIVE TRAFFIC (G3/G4)") to live counts
+  (registered 0→1, calls 0→1, sales +1, leads +1). **Source stated honestly:
+  locally-replayed events through the live route, not live provider traffic.**
+
+**Real bug found + fixed by the G4 replay:** `OutboundEvent.eventId` was stored as
+`dedupKey.slice(0,64)`; two CAPI Purchase events for the **same lead across
+different gateways** share a `Purchase:<client>:<phone>:<txn…>` prefix, so their
+64-char truncations collided on the `@unique eventId` column and 502'd 12/35 of the
+routing checks. The send path keys on `dedupKey` (already `@unique`), so the fix
+(`src/lib/ingest.ts`) stores the **full, already-unique `dedupKey`** as `eventId`
+(no truncation). Regression test in `test/ingest.test.ts` ("one lead paying through
+two gateways …"). Result: **35/35 routing, 7/7 handshake, dashboard flip confirmed.**
+
+**Environment notes (re-verified 2026-11-03):**
+- The dev tunnel host `oak-alpha-rewards-workstation.trycloudflare.com` is **DEAD**
+  (HTTP 000 / unresolvable; subdomains die with the cloudflared process). The route
+  was proven host-agnostic against a local `:3100`/`:3101` `next start`, so G4 does
+  not depend on that host — G10 supplies the real host.
+- `pnpm test` **127/127** (was 126, +1 regression test) · `pnpm build` exit 0 ·
+  working tree clean (no dev.db/.env/.tmp committed).
+
 ## Next step (post D-01/D-02 ad-account recenter + seed purge)
 ```
 NEXT: paste the xt.js snippet on join.upcurvv.com/cll + 1 real Meta ad

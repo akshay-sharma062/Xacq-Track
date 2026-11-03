@@ -4,7 +4,7 @@ Single source of truth for "what is real vs. dummy". A path is **LIVE** only
 when a real-data verification has been shown (commit SHA + output, dated).
 Until then it is **MOCK** (seed/simulate/fake) or **BLOCKED: needs X**.
 
-Last updated: G1 LIVE · G2 SKIPPED-DEFERRED · D-01/D-02 recenter+purge DONE · D-04 multi-account onboarding DONE (7/7) · D-05 Dashboard V2 (All-default + 10-min autopull + real FX + dense dashboard) DONE · public tunnel verified 2026-10-30 · owner: lead engineer
+Last updated: G1 LIVE · G2 SKIPPED-DEFERRED · D-01/D-02 recenter+purge DONE · D-04 multi-account onboarding DONE (7/7) · D-05 Dashboard V2 DONE · D-06 / G4 webhooks-per-client DONE (app-side 35/35 routes + per-client signature secret; real-provider hop BLOCKED on gateway keys) · dev tunnel host DEAD (re-verified 2026-11-03) · owner: lead engineer
 
 ## Data stores
 
@@ -106,8 +106,7 @@ No seed backfill counts.
 | Public tunnel for webhooks/ingest | cloudflared quick tunnel | Live, verified end-to-end 2026-10-30 (see "Public tunnel" above) | Stable base for G3 `xt.js` + G4 gateway webhooks; retired at G10 | **LIVE (temporary)** | Public tunnel block |
 | xt.js on landing pages | `xt/` → `public/xt.js` (4.96 KB) | Built + served at `/xt.js` via tunnel; contract-fixed (`/api/ingest` + CORS); **not deployed to any live page** | Pasted on pilot pages (`cl_upcurvv`); ≥95% of leads carry ad_id/UTM — D-03: measured on LIVE traffic only | **AWAITING LIVE TRAFFIC** | G3 |
 | Meta dynamic URL params | — (Ads Manager side) | Unaudited | `{{campaign.id}}/{{adset.id}}/{{ad.id}}` on every ad URL; app audit screen | **MOCK** | G3 |
-| Razorpay / Cashfree / Cosmofeed | `adapters/payments.ts` + `api/webhooks` | HMAC verify implemented; secrets are seed fakes (`whsec_*`) | Real gateway webhooks + real secrets + ₹1 test payments + 3× replay dedup proof | **BLOCKED: needs gateway secrets + test payments** | G4 |
-| TagMango / FlexiFunnels | `adapters/payments.ts` | Implemented | Real webhooks | **BLOCKED: needs platform URLs + secrets** | G4 |
+| **G4 per-client routing (Razorpay / Cashfree / Cosmofeed / TagMango / FlexiFunnels)** | `api/webhooks/[platform]` + `adapters/payments.ts` + `ingest.ts` | **APP-SIDE DONE 2026-11-03 (D-06):** `POST /api/webhooks/<platform>?client=<id>` reconciled across all **7 clients × 5 G4 platforms = 35/35 accepted** via a locally-replayed, correctly-signed provider event (`scripts/g4-replay.ts`); each platform's `verify` ran against a **per-client `Client.webhookSecret`** (provisioned for all 7; real, not the seed `whsec_*` fakes). Bad signature 502s (rejects), not a fake accept. Fixed a real latent bug the replay exposed: `OutboundEvent.eventId` was the lossy `dedupKey.slice(0,64)` → two CAPI events for one lead across gateways collided on the `@unique` column and 502'd 12/35; now stores the full already-unique `dedupKey` (regression test in `ingest.test.ts`). Dashboard leads-family KPIs flip 0→live on a full-funnel replay. **REAL-PROVIDER HOP still BLOCKED:** no RAZORPAY/CASHFREE/COSMOFEED/TAGMANGO/FLEXIFUNNELS gateway API key in `.env` (only the Meta token + verify token + FX + ingest shared secret exist) — so live gateway traffic isn't exercisable yet; per-client `webhookSecret` is set, ready to point a real gateway at. | Point the 5 real gateways at `POST /api/webhooks/<platform>?client=<id>` on the G10 host; per-client `webhookSecret` already on each Client row | **DONE (app-side) · BLOCKED(real-provider): needs 5 gateway API keys in `.env`** | D-06 · `scripts/g4-replay.ts` (35/35, 7/7 handshake) · 127/127 tests |
 | Aevent / Zoom | `adapters/engagements.ts` | Implemented | Real webhooks + test attendee (register/attend/replay) | **BLOCKED: needs platform configs + test attendee** | G5 |
 | Calendly / Pabbly / WhatsApp | `adapters/engagements.ts` | Implemented | Real webhooks + real booking + WhatsApp round-trip | **BLOCKED: needs accounts + test actions** | G6 |
 | Sheets/CSV backfill | `api/import` + `src/lib/csv.ts` | Implemented (dry-run preview not yet built) | Real old-client sheet import with mapping + commit-after-approve | **BLOCKED: needs a real sheet** | G7 |
@@ -141,7 +140,7 @@ No seed backfill counts.
 | Audit log | `security.ts` + `audit` screen | Working, seed rows | Live actions | LIVE (code-complete) | G0 commit |
 | Phone/email hashing (SHA-256) | `src/lib/hash.ts` | Working, unit-tested | — | LIVE (code-complete) | G0 commit |
 | Ingest rate limit | `security.ts` | Working (in-memory) | Redis-backed for multi-node | LIVE (code-complete) | G0 commit |
-| Webhook signature verify | `adapters/*` + `ingest.ts` | Razorpay/Cashfree HMAC + shared-secret verify; unit-tested | Real keys | LIVE (code-complete, keys pending G4) | G0 commit |
+| Webhook signature verify | `adapters/*` + `ingest.ts` | Razorpay/Cashfree HMAC + shared-secret verify; unit-tested; **per-client `Client.webhookSecret` provisioned for all 7 (G4/D-06)** | Real gateway keys (in `.env`) | LIVE (code-complete + app-side G4 verified; 5 real gateway API keys still pending) | D-06 (was G0) |
 
 Legend: **LIVE** = real-data verified · **MOCK** = code-complete but running on
 seed/simulate/fake · **BLOCKED: needs X** = code exists, live path waits on X.

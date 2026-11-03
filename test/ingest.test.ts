@@ -30,6 +30,15 @@ function razorpayPaid(txnId: string, phone: string, amount = 499900) {
     notes: { phone, email: `p${phone}@x.com`, name: "Payer", product: "Cohort" },
   });
 }
+function cashfreePaid(txnId: string, phone: string) {
+  return JSON.stringify({
+    data: {
+      transactionId: txnId, orderId: `o_${txnId}`, amount: 4999, currency: "INR", status: "PAID",
+      customerEmail: `p${phone}@x.com`, customerDetails: { phone, name: "Payer" }, description: "Webinar",
+    },
+    eventId: `evt_${txnId}`, eventDate: "2026-11-03T14:00:00+05:30",
+  });
+}
 
 describe("ingest e2e (spec 4/5/6: one pipeline, identity, dedup, source-unknown)", () => {
   it("a fresh Meta lead form creates a lead + event + queued CAPI", async () => {
@@ -90,6 +99,33 @@ describe("ingest e2e (spec 4/5/6: one pipeline, identity, dedup, source-unknown)
       where: { gateway: "razorpay", gatewayTxnId: "rzp_dup" },
     });
     expect(rows).toHaveLength(1);
+    await close();
+  });
+
+  it("one lead paying through two gateways enqueues two CAPI events without a eventId collision (G4)", async () => {
+    // Regression for the G4-replay 502: OutboundEvent.eventId is @unique and
+    // was stored as dedupKey.slice(0,64). Two Purchase CAPI events for the SAME
+    // lead across different gateways share a `Purchase:<client>:<phone>:<txn…>`
+    // prefix, so their 64-char truncations collided and the second create 502'd.
+    // The fix stores the full (already-unique) dedupKey, so both must land.
+    const { prisma, close } = await freshDb();
+    const phone = "9812340070";
+    const rzp = await processInbound({
+      prisma, clientId: FIT, platform: "razorpay", clientSecret: null,
+      rawBody: razorpayPaid("tz_gate_1", phone), headers: {},
+    });
+    const cf = await processInbound({
+      prisma, clientId: FIT, platform: "cashfree", clientSecret: null,
+      rawBody: cashfreePaid("cf_gate_2", phone), headers: {},
+    });
+    // Both webhooks processed (no 502 / "failed" from a constraint violation).
+    expect(rzp.status).toBe("processed");
+    expect(cf.status).toBe("processed");
+    const purchases = await prisma.outboundEvent.findMany({ where: { type: "Purchase" } });
+    // Two distinct CAPI Purchase events, two distinct dedup + event ids.
+    expect(purchases).toHaveLength(2);
+    expect(new Set(purchases.map((e) => e.dedupKey)).size).toBe(2);
+    expect(new Set(purchases.map((e) => e.eventId)).size).toBe(2);
     await close();
   });
 
