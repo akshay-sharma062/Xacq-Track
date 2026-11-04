@@ -182,12 +182,21 @@ export interface AllDashboard {
   topAds: AdPerfRow[]; // spend-ranked across all accounts
   capi: {
     queued: number;
-    sent: number;
+    sent: number; // status=sent total (live + simulated)
     failed: number;
     skipped: number;
     total: number;
-    avgMq: number | null;
-    last20: { id: string; type: string; value: number | null; mq: number | null; status: string; when: string; dedupKey: string }[];
+    live: number; // G8: actually POSTed to Meta's Conversions API
+    simulated: number; // G8: local mark (no token/pixel) — never shown as live
+    // G8: Meta-REPORTED Event Match Quality on Purchase (null = no live Purchase EMQ yet).
+    avgMqMeta: number | null;
+    // G8: local heuristic estimate only (NOT Meta's number) — surfaced separately.
+    avgMqEst: number | null;
+    last20: {
+      id: string; type: string; value: number | null;
+      mq: number | null; mqFromMeta: boolean; simulated: boolean;
+      status: string; when: string; dedupKey: string;
+    }[];
   };
   sync: {
     dataAsOf: string | null; // max ad-account lastPulledAt (ISO) — the "data as of" stamp
@@ -443,24 +452,42 @@ export async function dashboardAll(
     .sort((a, b) => b.spendInr - a.spendInr)
     .slice(0, 20);
 
-  // -- CAPI pipeline: queued/sent/failed/skipped + avg match-quality + last 20.
+  // -- CAPI pipeline: queued/sent/failed/skipped + match-quality + last 20.
+  // G8: split the "sent" rows into LIVE (a real Meta Conversions API POST)
+  // vs SIMULATED (no token/pixel -> local mark). Simulate numbers are never
+  // presented as live (D-05 honesty rule). `avgMqMeta` = Meta-REPORTED
+  // Event Match Quality only (emqFromMeta=true) — the G8 acceptance number
+  // (EMQ>=7 on Purchase); the local estimate is kept separate (`avgMqEst`).
   const capiRows = await prisma.outboundEvent.findMany({
     where: { clientId: { in: clientIds } },
     orderBy: { eventTime: "desc" },
     take: 200,
   });
   const capiCounts = { queued: 0, sent: 0, failed: 0, skipped: 0 };
-  for (const r of capiRows) capiCounts[r.status as keyof typeof capiCounts]++;
-  const mqRows = capiRows.filter((r) => r.matchQuality != null);
+  let capiSimulatedSent = 0;
+  let capiLiveSent = 0;
+  for (const r of capiRows) {
+    capiCounts[r.status as keyof typeof capiCounts]++;
+    if (r.status === "sent") (r.simulated ? capiSimulatedSent++ : capiLiveSent++);
+  }
+  const liveMq = capiRows.filter((r) => r.type === "Purchase" && r.emqFromMeta && r.matchQuality != null);
+  const estMq = capiRows.filter((r) => r.type === "Purchase" && !r.emqFromMeta && r.matchQuality != null);
   const capi = {
     ...capiCounts,
     total: capiRows.length,
-    avgMq: mqRows.length ? Math.round(mqRows.reduce((s, r) => s + (r.matchQuality ?? 0), 0) / mqRows.length) : null,
+    live: capiLiveSent,
+    simulated: capiSimulatedSent,
+    // Meta-reported EMQ (Purchase only). null = no live Purchase EMQ yet.
+    avgMqMeta: liveMq.length ? Math.round(liveMq.reduce((s, r) => s + (r.matchQuality ?? 0), 0) / liveMq.length) : null,
+    // Local heuristic estimate (not Meta's number) — surfaced separately.
+    avgMqEst: estMq.length ? Math.round(estMq.reduce((s, r) => s + (r.matchQuality ?? 0), 0) / estMq.length) : null,
     last20: capiRows.slice(0, 20).map((r) => ({
       id: r.id,
       type: r.type,
       value: r.value,
       mq: r.matchQuality,
+      mqFromMeta: r.emqFromMeta,
+      simulated: r.simulated,
       status: r.status,
       when: r.eventTime.toISOString(),
       dedupKey: r.dedupKey,

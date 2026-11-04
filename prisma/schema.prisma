@@ -531,6 +531,28 @@ model OutboundEvent {
   sentToMeta   Boolean @default(false)
   status      String @default("queued") // queued | sent | failed | skipped
   matchQuality Int?
+  // G8 (live CAPI, PRD 5.8): true when this row was SENT to Meta's live
+  // Conversions API (HTTP 200). false = a simulate-mode row (no token / no
+  // pixel configured for the client) — the dashboard labels those so
+  // simulate numbers are never shown as live.
+  simulated   Boolean @default(false)
+  // The pixel/dataset id the event was sent to (from META_PIXEL_ID_<clientId>).
+  pixelUsed   String?
+  // G8 (CAPI live): the Meta-returned ack id for this send (the fbtrace_id /
+  // the event_id Meta echoes back — "the returned event_id", NOT our
+  // generated eventId). Persisted as end-to-end evidence.
+  metaAckId   String?
+  // G8: Meta's OWN event_match_quality returned in the live CAPI response,
+  // stored VERBATIM (it is a 0-10 number in this API version, but we never
+  // assume — a string level is kept as a string). D-05 honesty rule: a
+  // Meta-reported value is never coerced into or confused with our local
+  // estimateMatchQuality heuristic.
+  metaEmq     String?
+  // G8: true when `matchQuality` above is Meta's own live Event Match Quality
+  // (from event_hub_log_view.event_match_quality), false = our local
+  // estimateMatchQuality heuristic. Never conflates a local guess with a
+  // Meta-reported number (spec 5.8 / D-05 honesty rule).
+  emqFromMeta Boolean @default(false)
   error       String?
   createdAt   DateTime @default(now())
   sentAt      DateTime?

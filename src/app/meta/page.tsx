@@ -100,10 +100,26 @@ export default async function MetaPage({
             <span className="badge warn">{status.counts.queued} queued</span>
             <span className="badge bad">{status.counts.failed} failed</span>
             <span className="badge">{status.counts.skipped} skipped</span>
-            <span className="muted" style={{ fontSize: 12 }}>
-              avg Purchase MQ: <strong className={status.avgPurchaseMq != null && status.avgPurchaseMq >= 7 ? "good" : "warn"}>{status.avgPurchaseMq ?? "n/a"}</strong>
-            </span>
           </div>
+        </div>
+        {/* G8: live vs simulated split — a simulated send (no token/pixel) is
+            never presented as a live Meta send. */}
+        <div className="row mb" style={{ gap: 16, fontSize: 13 }}>
+          <span>
+            live to Meta <b className="good">{status.liveSent}</b>
+          </span>
+          <span>
+            simulated (local) <b>{status.simulatedSent}</b>
+          </span>
+          <span className="muted">
+            avg Purchase MQ (Meta-reported):{" "}
+            <strong className={status.avgPurchaseMq != null && status.avgPurchaseMq >= 7 ? "good" : "warn"}>
+              {status.avgPurchaseMq ?? "n/a — no live Purchase EMQ yet"}
+            </strong>
+            {status.avgPurchaseMqEstimated != null && (
+              <span className="faint"> · est {status.avgPurchaseMqEstimated} (local heuristic, not Meta's number)</span>
+            )}
+          </span>
         </div>
         <table className="tbl">
           <thead>
@@ -123,10 +139,21 @@ export default async function MetaPage({
                   {r.error ? <div className="faint" style={{ fontSize: 11 }}>{r.error}</div> : null}
                 </td>
                 <td className="mono">{r.value ? inr(r.value) : "—"}</td>
-                <td className="mono">{r.matchQuality ?? "—"}</td>
+                <td className="mono">
+                  {r.matchQuality != null ? (
+                    <>
+                      {r.matchQuality}
+                      {r.emqFromMeta ? <span className="faint"> (Meta)</span> : <span className="faint"> (est)</span>}
+                    </>
+                  ) : r.simulated ? (
+                    <span className="faint">simulated</span>
+                  ) : (
+                    "—"
+                  )}
+                </td>
                 <td>
-                  <span className={`badge ${r.status === "sent" ? "good" : r.status === "failed" ? "bad" : r.status === "skipped" ? "warn" : ""}`}>
-                    {r.status}
+                  <span className={`badge ${r.status === "sent" ? (r.simulated ? "" : "good") : r.status === "failed" ? "bad" : r.status === "skipped" ? "warn" : ""}`}>
+                    {r.status === "sent" && r.simulated ? "sent (sim)" : r.status}
                   </span>
                 </td>
                 <td style={{ textAlign: "right" }} className="faint">
@@ -139,6 +166,7 @@ export default async function MetaPage({
         <div className="muted" style={{ fontSize: 12, marginTop: 10 }}>
           Rules enforced: never send an event twice (dedup key) · never send a Purchase for a
           refunded payment (recorded as a skipped Refund note).
+          {status.rows.length === 0 && " No CAPI events yet for this client."}
         </div>
       </div>
     </>

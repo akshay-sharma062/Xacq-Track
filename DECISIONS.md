@@ -258,3 +258,62 @@ go-live path. The code stays dormant + green (its tests untouched); the
 `/act_…/leadgen_leads` 2500-on-probe note stands (LeadGen hangs off a Page,
 not an ad account; no Page is wired). No re-gating; if G2 is ever scheduled,
 re-open from `GOLIVE_STATUS.md` row "Instant Forms".
+
+## D-07 — G8 CAPI LIVE: per-client Meta pixel (Data Source) mapping (2026-11-03)
+
+The G8 gate (spec 5.8 + Phase-3 acceptance **EMQ>=7 on Purchase**): CAPI events
+POST to a client's Meta **pixel / Data Source** — *not* its ad-account id. The
+PO supplied the pixel ids keyed by ad-account *names*; reconciled to the 7
+onboarded client slugs (live Meta display-name + DB `AdAccount` metadata
+cross-checked 2026-11-03; the two Abhishek slugs are **distinct ad accounts**
+in the DB, `act_500594992542527` vs `act_1042839737275035`, so the PO's one
+shared pixel id for both names is legitimate).
+
+**The mapping** (values live ONLY in `.env` as `META_PIXEL_ID_<CLIENTID-UPPER>`;
+key names documented in `.env.example`, reader is `src/lib/meta/pixel-map.ts`):
+
+| PO ad-account name | pixel id | client slug | `.env` key |
+|---|---|---|---|
+| FML X UPCURVV | 4438125733120237 | `cl_upcurvv` | `META_PIXEL_ID_CL_UPCURVV` |
+| the job work shop (FML & The Job Workshop — **default**) | 1336763808671896 | `cl_the-job-workshop-ad-account` | `…_CL_THE_JOB_WORKSHOP_AD_ACCOUNT` |
+| the job work shop (Kajabi Landing — **unused-pending-decision**) | 1753137982216053 | same | `…_ALT` (recorded, not wired) |
+| FML X Swaraj | 28395623206787014 | `cl_cardgenius-2` | `META_PIXEL_ID_CL_CARDGENIUS_2` |
+| FML x Cracckify | 1730094938074293 | `cl_fml-new` | `META_PIXEL_ID_CL_FML_NEW` |
+| FML - Abhishek Pal **and** Abhishek Pal - FML (PO wrote the same id for both) | 1020140539575139 | `cl_abhishek-pal-fml` | `META_PIXEL_ID_CL_ABHISHEK_PAL_FML` |
+| FML FOR ABHISHEK 2 | 501477182468565 | `cl_fml-x-abhishek-pal` | `META_PIXEL_ID_CL_FML_X_ABHISHEK_PAL` (+ `…_ALT` = the shared `1020140539575139`) |
+| — no pixel supplied — | — | `cl_piyush-ahuja` | *none — stays in simulate mode (not a bug; the "lacks a pixel" row in GOLIVE_STATUS)* |
+
+**Send-mode flip (`src/lib/meta/capi.ts` `sendQueue`):** LIVE = a real
+Conversions API POST only when BOTH `META_ACCESS_TOKEN` **and** the client's
+pixel are present; otherwise SIMULATE (mark sent locally, `simulated=true`, no
+network — never a canned live-success). A Meta 4xx/403 = **BLOCKED with the
+exact error string** on the row (retried on the next queue run), never a fake
+accept. Meta's own **Event Match Quality** is read back per event
+(`event_hub_log_view[].event_match_quality`), persisted verbatim
+(`OutboundEvent.metaEmq` + `emqFromMeta` true only when Meta reported a usable
+number — never mixed with the local heuristic, which is surfaced separately as
+"est"), and surfaced on the dashboard CAPI strip (**live vs simulated split**,
+Meta-reported avg Purchase EMQ — the G8 acceptance number). The frozen wire
+`event_id` = `sha256(dedupKey).slice(0,40)` derived from the row's *stored*
+`dedupKey`, so a crash-and-retry re-POSTs the same event_id and Meta dedups —
+the "never send twice" rule holds across retries.
+
+**Proof:** `scripts/g8-replay.ts` (`pnpm capi:replay`) pushes ONE synthetic
+Conversions API event for a pixel-bearing client through the real send
+primitive, clearly labelled **REPLAYED — NOT LIVE TRAFFIC**, capturing Meta
+HTTP status + returned event id + Meta's reported EMQ (`.g8-evidence.txt`,
+gitignored). **Result 2026-11-04:** the replay returned **Meta HTTP 200**
+(fbtrace_id `AoRi_ZmEpa895gB22GnWzRW`) after two wire-shape fixes — Meta 400
+subcode `2804019` (event_name required) → standard-name map, and subcode
+`2804039` ("action source invalid … such as 'website'") → `action_source`
+flipped `system`→`browser`→**`website`** with `event_source_url` set, because
+web-originated events require a WEB source. Meta's 200 ack came back **without**
+a hub-log `event_id` or EMQ for this synthetic (no G3-matched browser-pixel
+traffic yet), so `EMQ≥7 on Purchase` stays gated on real G3 live traffic — not
+claimed here. Add-ons: "Meta vs Track" report wiring = **AWAITING G3 live
+traffic** (never faked); weekly Monday 9AM IST summary + PDF scheduler =
+recorded stub, full PDF is G9/G11.
+
+**Scope rule:** CAPI = money + Meta-gated → **[REVIEW]** commit; PO reviews
+before the task is marked done. No pull row is touched; pixels/tokens stay in
+`.env` only.

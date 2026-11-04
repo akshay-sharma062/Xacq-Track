@@ -184,8 +184,9 @@ export default async function Dashboard({
           <span>
             queued <b>{d.capi.queued}</b>
           </span>
-          <span>
-            sent <b className="good">{d.capi.sent}</b>
+          <span title="G8: 'live' = a real Meta Conversions API POST; 'simulated' = local mark, no token/pixel yet">
+            sent <b className="good">{d.capi.sent}</b>{" "}
+            <span className="faint">({d.capi.live} live · {d.capi.simulated} sim)</span>
           </span>
           <span>
             failed <b className="bad">{d.capi.failed}</b>
@@ -193,8 +194,9 @@ export default async function Dashboard({
           <span>
             skipped <b>{d.capi.skipped}</b>
           </span>
-          <span>
-            avg match-Q <b>{d.capi.avgMq ?? "—"}</b>
+          <span title="G8: Meta's OWN Event Match Quality on Purchase (acceptance EMQ ≥ 7). '—' = no live Purchase EMQ yet.">
+            avg match-Q (Meta) <b>{d.capi.avgMqMeta ?? "—"}</b>
+            {d.capi.avgMqEst != null && <span className="faint"> · est {d.capi.avgMqEst}</span>}
           </span>
           {d.capi.total === 0 && <span className="faint">0 events queued — no CAPI traffic yet (G8)</span>}
         </div>

@@ -53,3 +53,5 @@ pnpm-debug.log*
 
 # G4 scratch evidence
 .g4-evidence.txt
+# G8 scratch evidence (labelled CAPI replay proof)
+.g8-evidence.txt

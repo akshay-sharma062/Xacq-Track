@@ -261,3 +261,54 @@ WHEN YOU PASTE + Meta delivers a real click:
 
 THEN: gate G4 (Razorpay/Cashfree webhooks for cl_upcurvv).
 ```
+
+## G8 — CAPI LIVE with per-client pixel mapping (D-07, 2026-11-04) [REVIEW]
+G8 gate = spec §5.8 + Phase-3 acceptance **EMQ≥7 on Purchase**. CAPI send
+path flipped from simulate to **real Conversions API POST** with per-client
+Meta pixel (Data Source) mapping.
+
+**Pixel mapping (values in `.env` only; code is value-free)** — `META_PIXEL_ID_<CLIENTID-UPPER>`
+via `meta/pixel-map.ts` (`pixelForClient`). PO-supplied IDs reconciled to all 7
+slugs; two accounts share one ID where PO wrote the same id (stored, ALT-keyed
+for the second). `cl_piyush-ahuja` intentionally has **no** pixel key ⇒ stays
+simulate (never faked).
+
+**Live/simulate flip** — `sendQueue` sends a real POST when BOTH
+`META_ACCESS_TOKEN` + a client pixel are present; no token ⇒ honest local mark
+(`simulated=true`), no network. Hashed `ph`/`em` (SHA-256), `fbc`/`fbp`,
+frozen `event_id` dedup (never send twice), retry queue on 4xx/403 (retriable,
+row `failed` + the **exact Meta error string**, no fake success).
+
+**EMQ read-back** — persisted verbatim from Meta
+`event_hub_log_view[].event_match_quality`; `emqFromMeta=true` **only** when Meta
+returned a usable number — never invented. Dashboard CAPI strip splits live vs
+simulated + Meta-reported vs estimated EMQ.
+
+**Wire-shape fix that unblocked Meta** — web-originated events send
+`action_source:"website"` + `event_source_url`. Meta 400 subcode `2804039`
+rejected `system`/`browser` and prescribed `"website"`; flipping
+`CAPI_ACTION_SOURCE` to `"website"` (and threading a source URL into
+`buildCapiEvent`) produced the **Meta HTTP 200 ack** (fbtrace_id
+`AoRi_ZmEpa895gB22GnWzRW`) on the labelled `pnpm capi:replay` synthetic Purchase
+for `cl_upcurvv`.
+
+**Honest caveat** — that 200 ack came back **without** a hub-log `event_id` or
+EMQ value, because the replay is synthetic (no G3-matched browser-pixel
+traffic). `EMQ≥7 on Purchase` therefore remains gated on **real G3 live
+traffic** through this path — not claimed from synthetic data.
+
+**Add-ons** — "Meta vs Track" report wiring = **AWAITING G3 live traffic**
+(never faked); weekly Monday 9AM IST summary + PDF scheduler = recorded stub
+(`GET /api/reports?key=weekly` is live + wired; the durable cron + PDF are G9/G11).
+
+**Verification** — `pnpm typecheck` 0 · `pnpm test` **138/138** (+2 CAPI
+live-path cases incl. the `website` wire shape) · `pnpm build` exit 0 · live
+CAPI POST evidence (`Meta HTTP 200` + fbtrace_id) above. No pull row touched
+(ad=3808, adSet=1172, spend=3808, fxRate=1, G1=cl_upcurvv); WAL journal intact
+(`f5a641b` fix stands); no `.env`/`dev.db`/scratch committed.
+
+**Next gate:** drive **real G3 live traffic** (paste the `xt.js` snippet on
+`join.upcurvv.com` + one real Meta ad click) so G8's acceptance number
+(EMQ≥7 on Purchase) is claimed from a Meta-reported EMQ on G3-matched Purchase
+traffic — not from the labelled replay. Then G9 (Meta-vs-Track reconciliation
++ weekly PDF) and G10/G11 (platform go-live).
