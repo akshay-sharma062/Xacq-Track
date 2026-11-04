@@ -248,3 +248,13 @@ locally-replayed events, not live provider traffic.
 G4's — the route works on any host). No G1/D-04 pull row is touched; G4 writes
 only ingest rows. Webhook path + CAPI + per-client permission → [REVIEW].
 
+
+## Pre-step note — G2 Meta Instant Forms = final deferred (PO decision 2026-11-03)
+
+G2 (Meta Instant Forms: `adapters/meta.ts` `meta_form_lead` + the `hub.challenge`
+handshake + `/act_…/leadgen_leads`) is **finally deferred, not just skipped**:
+the PO confirmed 2026-11-03 that Meta Instant Forms will not be on the
+go-live path. The code stays dormant + green (its tests untouched); the
+`/act_…/leadgen_leads` 2500-on-probe note stands (LeadGen hangs off a Page,
+not an ad account; no Page is wired). No re-gating; if G2 is ever scheduled,
+re-open from `GOLIVE_STATUS.md` row "Instant Forms".
