@@ -584,3 +584,73 @@ explicit `eventSourceUrl`. Once either exists, the 39 simulated rows
 flip to live Meta 200s on the next queue run with **no code change**.
 EMQ≥7 on Purchase still requires G3-matched browser-pixel traffic (the
 refreshed D-09 snippet, paste-ready on `join.upcurvv.com/cll`).
+
+## D-12 — dashboard engagement KPIs + per-client event_source_url for CAPI live (2026-11-05) [REVIEW]
+Ticket: "dashboard engagement KPIs + per-client event_source_url for CAPI
+live" — two separate tasks.
+
+**Task 1 — engagement KPIs (stored rollup only, no new Meta calls, no new DB
+writes):** the `Spend` rows already carry Meta's rollup engagement
+(`impressions`/`reach`/`clicks`/`thruPlays` on all 3,818 rows; live totals
+27,365,855 / 15,204,026 / 274,812 / 0, verified read-only). Added a KPI row
+to the dashboard (All-aggregate + per-client views, the same dense layout):
+**Total Impressions · Total Reach · Total Clicks · CTR · CPC**, computed ONLY
+over the same stored Spend rows the spend KPIs use (same range + client +
+`?adAccount=` filters — `spendRows` is already scoped, so the D-08 range
+control + per-account drill-down apply automatically). `EngagementKpis.cpc =
+spendInr / clicks` (INR-normalised, exact); `ctr = clicks / impressions`
+(exact). Impressions/reach/clicks are currency-agnostic; CTR/CPC display in
+INR like the spend KPIs. **LPV/CLPV + cost-per-LPV: NOT added** (D-08 probe
+proved Meta v23.0 400s `lpv`/`clpv` on these accounts) — an honest footnote
+renders below the KPI row ("LPV/CLPV not available on this Meta API version
+… no cost/LPV is guessed"), never a zero column. Live rendering verified:
+Impressions 2,73,65,855 · Reach 1,52,04,026 · Clicks 2,74,812 · CTR 1.0% ·
+CPC ₹12.
+
+**Task 2 — event_source_url (D-11's blocker) = .env config, NOT Funnel
+rows:** D-11 proved the live CAPI path needs a web source URL (Meta subcode
+2804039 rejects the `"system"` fallback; `"website"` requires
+`event_source_url`) and no client had a Funnel row (D-02 kept Funnel rows
+out — still stands). PO supplied 6 landing URLs; **stored them in `.env` as
+`META_EVENT_SOURCE_URL_<CLIENT>`** (gitignored, same value-free pattern as
+`META_PIXEL_ID_*`: code carries the key names in
+`META_EVENT_SOURCE_URL_ENV_KEYS`, values only in `.env`; `.env.example`
+documents the keys with empty values; a generic-key fallback means a
+PO-added client needs no code change). `cl_piyush-ahuja` has no key on
+purpose → stays simulated. A value is accepted only when it is a real
+`http(s)` URL — a placeholder is never POSTed. `sendQueue` URL resolution is
+now three tiers (injected → `.env` → Funnel `landingUrls`); none → stays
+SIMULATED with the exact D-11 note. **D-12 promotion:** rows a D-11 run left
+simulated are re-queued on the FIRST run where a URL exists (their first
+Meta send; the frozen event_id dedups any repeat).
+
+**Live re-run (2026-11-05, all 7 clients through `POST /api/capi` on the
+D-12 prod build):** cl_upcurvv **14/14 LIVE** (Meta 200 + fbtrace_id on
+each, e.g. `ALZF0WMyy8IdgpxL__LH8Kr`; the `.env` pixel + the `.env`
+event_source_url) · cl_cardgenius-2 / cl_fml-x-abhishek-pal /
+cl_abhishek-pal-fml / cl_fml-new / cl_the-job-workshop-ad-account **5/5
+LIVE each** · **cl_piyush-ahuja stays SIMULATED** (no pixel key + no URL
+key — the "still lacks a URL" case, not a bug; its 5 rows carry the exact
+simulate note). End state: **39 live · 5 simulated · 1 skipped · 0 failed**.
+**EMQ honesty:** the hub-log 200s carry NO `event_match_quality` (0 rows
+with a Meta-reported EMQ; `metaEmq=null`, `emqFromMeta=false`) — EMQ≥7
+stays gated on G3-matched live traffic, NOT claimed here.
+
+**Verification:** `pnpm typecheck` 0 · `pnpm test` **177/177** (15 files;
++8 D-12: engagement All/single-client/ad-account + CTR/CPC math, LPV-absent
++ footnote-renders, .env-URL verbatim + placeholder-reject, .env-URL→LIVE
+POST, D-11→LIVE promotion, no-pixel stays simulated) · `pnpm build` 0 ·
+live re-run above · dashboard KPI row verified in All + per-client views.
+No pull row touched (fixed point ad=3818/adSet=1177/spend=3818, WAL
+intact); URLs live only in `.env` (never committed); `.d12-*` scratch
+gitignored; no `next dev` next to prod.
+
+**Next gate = G3 live traffic (real EMQ≥7 proof).** The live CAPI path is
+now fully unblocked by code + `.env` config for the 6 URL-bearing clients
+(proven LIVE this run); the remaining evidence gap is Meta-reported EMQ on
+Purchase, which only real G3-matched browser-pixel traffic produces (the
+refreshed D-09 snippet, paste-ready on `join.upcurvv.com/cll` — note D-12
+now points CAPI at `https://join.upcurvv.com/cll` as the `event_source_url`
+for `cl_upcurvv`, consistent with the snippet host). PO adding URLs for the
+remaining clients flips them to live on the next queue run (no code
+change); `cl_piyush-ahuja` stays simulated until it gets a pixel + URL.

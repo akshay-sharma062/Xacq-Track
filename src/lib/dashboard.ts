@@ -229,6 +229,7 @@ export interface EngagementKpis {
   thruPlays: number;
   ctr: number; // clicks / impressions
   cpm: number; // spendInr / impressions * 1000
+  cpc: number; // D-12: spendInr / clicks (INR-normalised; 0 when no clicks)
   cpl: number; // spendInr / leads (0 when no leads)
   activeCampaigns: number;
   activeAds: number;
@@ -418,6 +419,10 @@ export async function dashboardAll(
     thruPlays: Math.round(thruPlays),
     ctr: impressions ? clicks / impressions : 0,
     cpm: impressions ? (spendInr / impressions) * 1000 : 0,
+    // D-12: CPC = INR spend / clicks, over the SAME stored Spend rows the
+    // spend KPIs use (the range + client + ad-account filters apply here too
+    // — spendRows is already scoped). Never a Meta call, never a guess.
+    cpc: clicks ? spendInr / clicks : 0,
     cpl: leadCount ? spendInr / leadCount : 0,
     activeCampaigns,
     activeAds,

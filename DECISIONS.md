@@ -606,3 +606,78 @@ client's default Funnel `landingUrls` (or an explicit `eventSourceUrl`).
 Next gate: **first Funnel landing URL per client → the 39 simulated
 rows flip to live Meta 200s automatically on the next queue run**
 (alongside G3 live traffic for the EMQ≥7 proof).
+
+## D-12 — dashboard engagement KPIs + per-client event_source_url for CAPI live (2026-11-05)
+
+**Task 1 — engagement KPIs (stored rollup only, no new Meta calls, no new DB writes).**
+The `Spend` rows already carry Meta's rollup engagement fields
+(`impressions`/`reach`/`clicks`/`thruPlays` on all 3,818 rows; live totals
+27,365,855 / 15,204,026 / 274,812 / 0, verified read-only). The KPI row now
+surfaces **Total Impressions · Total Reach · Total Clicks · CTR · CPC** on
+the dashboard — All-aggregate AND per-client views (same dense layout,
+drill-down re-scopes `clientIds`). Computed ONLY over the same stored Spend
+rows the spend KPIs use (same range + client + `?adAccount=` filters;
+`spendRows` is already scoped, so per-account drill-down and the D-08 range
+control apply automatically):
+- `EngagementKpis.cpc = spendInr / clicks` (INR-normalised, 0 when no
+  clicks); `ctr = clicks / impressions` (both exact math, unit-tested).
+- Impressions/reach/clicks are currency-agnostic (no per-currency split);
+  CTR/CPC display as the spend KPIs do (INR).
+- Range semantics: 30d (native) = the stored 30-day rollup; yesterday/7d
+  keep the D-08/D-10 rollup-label behaviour (the stored rows ARE the
+  servable data; unservable ranges show the "30-day rollup only" label).
+- **LPV/CLPV / cost-per-LPV: NOT added.** D-08 probe proved Meta v23.0 400s
+  `lpv`/`clpv` on these accounts → an honest footnote renders below the KPI
+  row: "LPV/CLPV not available on this Meta API version (v23.0 returns 400
+  on the lpv/clpv fields — D-08 probe). Not shown; no cost/LPV is
+  guessed." A test asserts no `lpv/clpv/costPerLpv` field exists anywhere
+  on the KPIs and the footnote renders.
+
+**Task 2 — event_source_url (D-11's blocker) = .env config, NOT Funnel rows.**
+D-11 proved the live CAPI path needs a web source URL (Meta subcode 2804039
+rejects the `"system"` fallback; a `"website"` source requires
+`event_source_url`), and no client had a Funnel row (D-02 kept Funnel rows
+out on purpose — still stands). PO supplied 6 landing URLs (the known set;
+`cl_piyush-ahuja` has none and stays simulated). **Decision: store them in
+`.env` as `META_EVENT_SOURCE_URL_<CLIENTID-UPPER>`** (gitignored, same
+value-free pattern as `META_PIXEL_ID_*` — code carries the key names in
+`META_EVENT_SOURCE_URL_ENV_KEYS`, values only in `.env`; `.env.example`
+documents the key names with empty values). A generic-key fallback
+(`META_EVENT_SOURCE_URL_<SLUG>`) means a PO-added client needs no code
+change. A value is accepted only when it is a real `http(s)` URL — a
+placeholder/non-URL returns null (never POSTed).
+
+`sendQueue` URL resolution is now three tiers (first available wins, all
+REAL values, none fabricated): (0) an explicitly injected `eventSourceUrl`
+(tests/callers) → (1) D-12 `.env` `META_EVENT_SOURCE_URL_<CLIENT>` → (2)
+the client's default Funnel `landingUrls` first valid URL (the D-11 source).
+No URL in any tier → the row stays SIMULATED with the exact D-11 note
+(never a Meta-invalid POST, never a 400). **D-12 promotion rule:** rows a
+D-11 run left `simulated` (capability was missing then) become re-eligible
+on the FIRST run where a source URL exists — re-queuing a simulated row is
+its FIRST Meta send (`sentToMeta=false`), not a duplicate (the frozen
+event_id dedups any repeat at Meta). No URL → nothing is promoted; the rows
+stay simulated.
+
+**Proof (live re-run 2026-11-05, all 7 clients through `POST /api/capi`
+on the D-12 prod build):** cl_upcurvv **14/14 LIVE** (Meta 200 +
+fbtrace_id on each, e.g. `ALZF0WMyy8IdgpxL__LH8Kr`; pixel
+`4438125733120237` + `event_source_url https://join.upcurvv.com/cll`) ·
+cl_cardgenius-2 / cl_fml-x-abhishek-pal / cl_abhishek-pal-fml /
+cl_fml-new / cl_the-job-workshop-ad-account **5/5 LIVE each** ·
+**cl_piyush-ahuja stays SIMULATED** (no pixel key + no URL key — the
+"still lacks a URL" case, not a bug; its 5 rows carry the exact simulate
+note). End state: **39 live + 5 simulated + 1 skipped, 0 failed**.
+**EMQ honesty:** the hub-log 200s carry NO `event_match_quality` (0 rows
+with a Meta-reported EMQ — `metaEmq=null`, `emqFromMeta=false`); EMQ≥7
+stays gated on G3-matched live traffic, NOT claimed here.
+
+**Verification:** `pnpm typecheck` 0 · `pnpm test` **177/177** (15 files;
++8 D-12: engagement All/single-client/ad-account + exact CTR/CPC math,
+LPV-absent + footnote-renders, .env-URL verbatim + placeholder-reject,
+.env-URL→LIVE POST, D-11→LIVE promotion, no-pixel-stays-simulated) ·
+`pnpm build` 0 · live re-run above · dashboard KPI row verified rendering
+the live totals (Impressions 2,73,65,855 · Reach 1,52,04,026 · Clicks
+2,74,812 · CTR 1.0% · CPC ₹12) in All + per-client views. No pull row
+touched (fixed point ad=3818/adSet=1177/spend=3818, WAL intact); URLs
+live only in `.env` (never committed); `.d12-*` scratch gitignored.

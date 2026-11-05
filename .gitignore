@@ -76,3 +76,8 @@ pnpm-debug.log*
 
 # D-11 scratch evidence (distilled findings committed in DECISIONS D-11)
 .d11-*
+
+# D-12 scratch evidence (distilled findings committed in DECISIONS D-12)
+.d12-*.cjs
+.d12-*.log
+.d12-*.sh

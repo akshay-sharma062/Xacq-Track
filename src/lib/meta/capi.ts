@@ -13,6 +13,7 @@
  */
 import { PrismaClient } from "../prisma";
 import { buildCapiEvent, shouldSendPurchase, toMetaWireEvent, normalizeMetaEmq, capiWireEventId } from "../capi";
+import { eventSourceUrlForClient } from "./pixel-map";
 import { CapiIdentity, CapiEventType } from "../types";
 
 /**
@@ -92,29 +93,24 @@ export async function sendQueue(
     fetch: doFetch = fetch,
   } = opts;
 
-  // Queued (or failed, to retry) — never "sent" again (dedup rule, spec 5.8).
-  const rows = await prisma.outboundEvent.findMany({
-    where: { clientId, status: { in: ["queued", "failed"] } },
-    include: { lead: true },
-  });
-
-  const out: SendOutcome = { total: rows.length, sent: 0, failed: 0, skipped: 0, simulated: 0, live: 0, errors: [] };
-  if (rows.length === 0) return out;
-
-  // G8 (D-07) + D-11: the WEB source for this client's CAPI events. Meta
-  // requires `event_source_url` alongside a web `action_source` — so we pair
-  // them from the client's DEFAULT funnel's first landing URL (a real value,
-  // never fabricated). If the client has no funnel landing URL, `eventSourceUrl`
-  // stays undefined and — D-11 — a live POST is NOT made (Meta's subcode
-  // 2804039 rejects the "system" fallback these pixels only accept "website"
-  // for): the queue stays simulated with an explicit note instead.
+  // G8 (D-07) + D-11 + D-12: the WEB source for this client's CAPI events.
+  // Meta requires `event_source_url` alongside a web `action_source` (subcode
+  // 2804039). Three tiers, first available wins — all are REAL values, never
+  // fabricated:
+  //   0. an explicitly injected URL (tests / a caller that knows the URL);
+  //   1. D-12: .env `META_EVENT_SOURCE_URL_<CLIENT>` (PO-supplied landing
+  //      URL; the .env pattern, value-free code — see META_EVENT_SOURCE_URL_
+  //      ENV_KEYS in pixel-map.ts);
+  //   2. the client's DEFAULT Funnel's first landing URL (the D-11 source;
+  //      Funnel rows are optional — D-02 kept them out on purpose).
+  // No URL in any tier -> `eventSourceUrl` stays undefined and a live POST is
+  // NOT made: the queue stays simulated with the exact note (never a
+  // Meta-invalid "system" POST, never a fake URL).
   const funnel = await prisma.funnel.findFirst({
     where: { clientId, default: true },
     select: { landingUrls: true },
   });
-  // D-11: an explicitly injected source URL (tests / callers) wins; else the
-  // client's default Funnel landing URL (the real value, never fabricated).
-  const eventSourceUrl = opts.eventSourceUrl ?? (() => {
+  const eventSourceUrl = opts.eventSourceUrl ?? eventSourceUrlForClient(clientId) ?? (() => {
     // Funnel.landingUrls is a JSON array (schema:88, e.g. '["https://…/w1"]').
     if (!funnel?.landingUrls) return undefined;
     let urls: string[];
@@ -126,6 +122,36 @@ export async function sendQueue(
     }
     return urls.find((s) => s.startsWith("http://") || s.startsWith("https://")) ?? undefined;
   })();
+
+  // D-12: rows a D-11 run left SIMULATED (the capability was missing back
+  // then — no token / no pixel / no source URL) become re-eligible on the
+  // FIRST run where a source URL exists: a simulated row was never sent to
+  // Meta (`sentToMeta=false`), so re-queuing it is its FIRST — not second —
+  // Meta send (the "never send twice" rule is about Meta sends, and the
+  // frozen event_id makes even a duplicate a Meta-deduped no-op). If no URL
+  // exists the rows simply stay simulated (nothing to promote).
+  if (eventSourceUrl) {
+    const sim = await prisma.outboundEvent.findMany({
+      where: { clientId, status: "sent", simulated: true, sentToMeta: false },
+      select: { id: true },
+    });
+    if (sim.length > 0) {
+      await prisma.outboundEvent.updateMany({
+        where: { id: { in: sim.map((r) => r.id) } },
+        data: { status: "queued", simulated: false, error: null },
+      });
+    }
+  }
+
+  // Queued (or failed, to retry; or D-12-promoted simulated) — never a
+  // live-"sent" row again (dedup rule, spec 5.8).
+  const rows = await prisma.outboundEvent.findMany({
+    where: { clientId, status: { in: ["queued", "failed"] } },
+    include: { lead: true },
+  });
+
+  const out: SendOutcome = { total: rows.length, sent: 0, failed: 0, skipped: 0, simulated: 0, live: 0, errors: [] };
+  if (rows.length === 0) return out;
 
   for (const row of rows) {
     const lead = row.lead ?? null;
@@ -212,7 +238,7 @@ export async function sendQueue(
     // note" branch), retriable once the client's default Funnel has a landing
     // URL. A pixel-bearing live POST only happens with a real source URL.
     if (!eventSourceUrl) {
-      const reason = `simulate: no funnel source URL for this client — these Meta pixels only accept a web ("website") source + event_source_url (Meta 400 subcode 2804039, G8/D-07 record), and a URL is never fabricated; the live send activates once the client's default Funnel has a landing URL (pixel ${metaPixelId} validated, NOT POSTed)`;
+      const reason = `simulate: no event source URL for this client (no .env META_EVENT_SOURCE_URL_${clientId.replace(/-/g, "_").toUpperCase()} value, no default Funnel landing URL) — these Meta pixels only accept a web ("website") source + event_source_url (Meta 400 subcode 2804039, G8/D-07 record), and a URL is never fabricated; the live send activates the moment a source URL exists (pixel ${metaPixelId} validated, NOT POSTed)`;
       await prisma.outboundEvent.update({
         where: { id: row.id },
         data: { status: "sent", simulated: true, sentAt: now, error: reason, pixelUsed: null },

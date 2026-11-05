@@ -101,6 +101,28 @@ export default async function Dashboard({
         <Stat label="Cost / sale" value={inr(k.costPerSale)} sub={k.sales === 0 ? "no sales yet" : `ROI ${pct(k.roas)}`} tone={k.roas >= 0 ? "good" : "warn"} />
       </div>
 
+      {/* D-12: engagement KPI row — computed ONLY over the same stored Spend
+          rows the spend KPIs above use (same range + client + ad-account
+          filters; no new Meta calls, no new DB writes). Impressions/reach/
+          clicks are currency-agnostic; CTR + CPC follow the spend KPIs'
+          INR display. LPV/CLPV: probe-proven unavailable on Meta v23.0 for
+          these accounts (D-08) — honest footnote, never a zero column. */}
+      <div className="card mb">
+        <SectionTitle right={<span className="faint" style={{ fontSize: 11 }}>{rangeLabel}</span>}>
+          Ad engagement (stored {rangeLabel === "Last 30 days" ? "30-day rollup" : "Spend rows"})
+        </SectionTitle>
+        <div className="grid cols-5" style={{ gridTemplateColumns: "repeat(5, 1fr)" }}>
+          <Stat label="Total Impressions" value={k.engagement.impressions.toLocaleString("en-IN")} sub="stored Spend rows" />
+          <Stat label="Total Reach" value={k.engagement.reach.toLocaleString("en-IN")} sub="stored Spend rows" />
+          <Stat label="Total Clicks" value={k.engagement.clicks.toLocaleString("en-IN")} sub="stored Spend rows" />
+          <Stat label="CTR" value={pct(k.engagement.ctr)} sub="clicks / impressions" />
+          <Stat label="CPC" value={k.engagement.clicks ? inr(k.engagement.cpc) : "—"} sub="spend INR / clicks" tone={k.engagement.clicks ? "accent" : undefined} />
+        </div>
+        <div className="faint" style={{ fontSize: 11, marginTop: 6 }} role="note">
+          LPV/CLPV not available on this Meta API version (v23.0 returns 400 on the lpv/clpv fields — D-08 probe). Not shown; no cost/LPV is guessed.
+        </div>
+      </div>
+
       {/* §2 B: per-ad-account cards — 7 by default, each a clickable drill-down. */}
       <div className="card">
         <SectionTitle right={<Link className="faint" href="/meta">Meta pull + CAPI →</Link>}>

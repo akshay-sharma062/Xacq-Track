@@ -48,6 +48,49 @@ export const META_PIXEL_ENV_KEYS: Record<string, string> = {
 };
 
 /**
+ * D-12 — per-client CAPI web source URL (the `event_source_url` these Meta
+ * pixels require on a "website" action source — subcode 2804039, G8/D-11).
+ * PO-supplied landing URLs, stored value-free in .env as
+ * `META_EVENT_SOURCE_URL_<CLIENTID-UPPER>` (gitignored — never in a commit).
+ * Same value-free pattern as META_PIXEL_ENV_KEYS: code carries the KEY NAMES
+ * (the known set, reconciled per client); the VALUES live only in .env.
+ *
+ * PO adds keys for the remaining clients before running the live re-run —
+ * any client WITHOUT a URL stays in simulate mode (the D-11 rule: exact
+ * note, never a fabricated URL, never a Meta 400). `cl_piyush-ahuja` has
+ * no key on purpose (no URL supplied — D-11/12 "still lacks a URL" case).
+ */
+export const META_EVENT_SOURCE_URL_ENV_KEYS: Record<string, string> = {
+  // PO-supplied 2026-11-05 (D-12):
+  cl_upcurvv: "META_EVENT_SOURCE_URL_CL_UPCURVV",
+  "cl_cardgenius-2": "META_EVENT_SOURCE_URL_CL_CARDGENIUS_2",
+  "cl_abhishek-pal-fml": "META_EVENT_SOURCE_URL_CL_ABHISHEK_PAL_FML",
+  "cl_fml-x-abhishek-pal": "META_EVENT_SOURCE_URL_CL_FML_X_ABHISHEK_PAL",
+  "cl_fml-new": "META_EVENT_SOURCE_URL_CL_FML_NEW",
+  "cl_the-job-workshop-ad-account": "META_EVENT_SOURCE_URL_CL_THE_JOB_WORKSHOP_AD_ACCOUNT",
+};
+
+/**
+ * Resolve a client's configured CAPI web source URL from .env
+ * (`META_EVENT_SOURCE_URL_<CLIENT>`, explicit key first, then the generic
+ * per-client key spelling so a PO-added client needs no code change).
+ * A value is only accepted when it is a real http(s) URL — a placeholder or
+ * a non-URL string returns null (never POSTed to Meta). Pure + read-only:
+ * no Prisma, no network.
+ */
+export function eventSourceUrlForClient(clientId: string): string | null {
+  const keys = [
+    META_EVENT_SOURCE_URL_ENV_KEYS[clientId],
+    `META_EVENT_SOURCE_URL_${clientId.toUpperCase().replace(/-/g, "_")}`,
+  ].filter(Boolean);
+  for (const key of keys) {
+    const v = (process.env[key] ?? "").trim();
+    if (v && /^https?:\/\/\S+$/i.test(v)) return v;
+  }
+  return null;
+}
+
+/**
  * The second (ALT) pixel env key for multi-pixel clients. Recorded per D-07
  * ("unused-pending-decision" / "shared with another client") — CAPI sends
  * use only the primary key.

@@ -415,12 +415,23 @@ describe("D-11 — the literal 'pixel' placeholder can never reach Meta", () => 
   it("D-11: valid pixel + token but NO source URL -> stays SIMULATED with a note (never POSTs a Meta-invalid 'system' web event)", async () => {
     const { prisma, row, close } = await seedPurchaseRow();
     const calls: MetaCall[] = [];
-    const out = await sendQueue(prisma, CLIENT, {
-      metaAccessToken: "tok",
-      metaPixelId: "1000000000000009", // valid numeric pixel
-      fetch: mockMeta(calls, () => ({ ok: false, status: 400, body: { error: { message: "Invalid parameter", error_subcode: 2804039 } } })) as unknown as typeof fetch,
-    });
-    // The bootstrap client has no default Funnel landing URL -> no web source
+    // D-12 hermeticity: Prisma loads .env into process.env on client init, so
+    // the D-12 .env URL for cl_upcurvv would otherwise satisfy the .env tier.
+    // Clear it (and the pixel var, unused here) to force the no-URL path;
+    // restore both afterwards.
+    const savedUrl = process.env.META_EVENT_SOURCE_URL_CL_UPCURVV;
+    delete process.env.META_EVENT_SOURCE_URL_CL_UPCURVV;
+    let out: Awaited<ReturnType<typeof sendQueue>>;
+    try {
+      out = await sendQueue(prisma, CLIENT, {
+        metaAccessToken: "tok",
+        metaPixelId: "1000000000000009", // valid numeric pixel
+        fetch: mockMeta(calls, () => ({ ok: false, status: 400, body: { error: { message: "Invalid parameter", error_subcode: 2804039 } } })) as unknown as typeof fetch,
+      });
+    } finally {
+      if (savedUrl !== undefined) process.env.META_EVENT_SOURCE_URL_CL_UPCURVV = savedUrl;
+    }
+    // No source URL in ANY tier (env cleared, no Funnel row) -> no web source
     // Meta accepts on these pixels (2804039) -> the queue stays simulated,
     // no network call is made, and the note says exactly what unblocks it.
     expect(calls).toHaveLength(0);
@@ -431,7 +442,11 @@ describe("D-11 — the literal 'pixel' placeholder can never reach Meta", () => 
     expect(got.status).toBe("sent");
     expect(got.simulated).toBe(true);
     expect(got.sentToMeta).toBe(false);
-    expect(got.error).toMatch(/no funnel source URL/i);
+    expect(got.error).toMatch(/no event source URL for this client/i);
+    // D-12: the note names the two source tiers (the .env key + the Funnel)
+    // so an operator knows precisely what unblocks the live send.
+    expect(got.error).toMatch(/META_EVENT_SOURCE_URL/);
+    expect(got.error).toMatch(/Funnel landing URL/i);
     expect(got.error).toMatch(/2804039/);
     expect(got.pixelUsed).toBeNull(); // validated pixel, not recorded as "used"
     await close();
