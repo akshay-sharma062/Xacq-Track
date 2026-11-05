@@ -6,6 +6,7 @@ import { inr, pct, Thumbnail } from "../components/ui";
 type Key =
   | "funnel"
   | "ad_perf"
+  | "ad_set"
   | "wasted_spend"
   | "new_vs_old"
   | "meta_vs_track"
@@ -15,6 +16,7 @@ type Key =
 const KEYS: { key: Key; label: string }[] = [
   { key: "funnel", label: "Funnel" },
   { key: "ad_perf", label: "Ad performance" },
+  { key: "ad_set", label: "Ad set metrics" },
   { key: "wasted_spend", label: "Wasted spend" },
   { key: "new_vs_old", label: "New vs old" },
   { key: "meta_vs_track", label: "Meta vs Track" },
@@ -139,6 +141,54 @@ function renderReport(key: Key, data: any, winDays: number) {
             ))}
           </tbody>
         </table>
+      );
+    case "ad_set":
+      return (
+        <div>
+          <table className="tbl">
+            <thead>
+              <tr>
+                <th>Ad set</th>
+                <th>Campaign</th>
+                <th style={{ textAlign: "right" }}>Spend (native)</th>
+                <th style={{ textAlign: "right" }}>Spend (INR)</th>
+                <th style={{ textAlign: "right" }}>Impressions</th>
+                <th style={{ textAlign: "right" }}>Reach</th>
+                <th style={{ textAlign: "right" }}>Clicks</th>
+                <th style={{ textAlign: "right" }}>CPM</th>
+                <th style={{ textAlign: "right" }}>CPC</th>
+                <th style={{ textAlign: "right" }}>ROAS</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(data as any[]).map((r) => (
+                <tr key={r.adsetId}>
+                  <td className="mono" style={{ fontSize: 12 }}>{r.adsetName}</td>
+                  <td className="faint" style={{ fontSize: 12 }}>{r.campaignName}</td>
+                  <td style={{ textAlign: "right" }} className="mono">{r.currency} {r.spendNative.toLocaleString("en-IN")}</td>
+                  <td style={{ textAlign: "right" }} className="mono">{inr(r.spendInr)}</td>
+                  <td style={{ textAlign: "right" }} className="mono">{r.impressions.toLocaleString("en-IN")}</td>
+                  <td style={{ textAlign: "right" }} className="mono">{r.reach.toLocaleString("en-IN")}</td>
+                  <td style={{ textAlign: "right" }} className="mono">{r.clicks.toLocaleString("en-IN")}</td>
+                  <td style={{ textAlign: "right" }} className="mono">{r.cpm ? inr(r.cpm) : "—"}</td>
+                  <td style={{ textAlign: "right" }} className="mono">{r.cpc ? inr(r.cpc) : "—"}</td>
+                  <td style={{ textAlign: "right" }} className={r.roas > 0 ? "good mono" : "faint mono"}>
+                    {r.roas > 0 ? r.roas.toFixed(2) + "×" : "— (no sales yet)"}
+                  </td>
+                </tr>
+              ))}
+              {(data as any[]).length === 0 && (
+                <tr><td colSpan={10} className="empty">No stored ad-set spend rows yet.</td></tr>
+              )}
+            </tbody>
+          </table>
+          {/* D-10: the honest LPV/CLPV record — Meta v23.0 400s lpv/clpv on
+              these accounts (D-08/D-10 probes); never a zero-column or a
+              guessed cost/LPV. */}
+          <div className="muted" style={{ fontSize: 11, marginTop: 8 }}>
+            LPV/CLPV: not returned by Meta v23.0 on these accounts (400 on the fields — D-08/D-10 probes). No cost/LPV is guessed.
+          </div>
+        </div>
       );
     case "wasted_spend":
       return (

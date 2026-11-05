@@ -10,7 +10,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getSession, resolveClientSet } from "@/lib/api-utils";
 import {
-  funnelReport, adPerformance, wastedSpend, newVsOld, metaVsTrack, sourceMix,
+  funnelReport, adPerformance, adSetPerformance, sumAdSets, wastedSpend, newVsOld, metaVsTrack, sourceMix,
   weeklySummary, toCsv, toXlsx, resolveAdAccountId,
   resolveAdAccountIdInSet, sumFunnel, sumAdPerf, sumSourceMix, sumMetaVsTrack, sumNewVsOld, sumWasted,
 } from "@/lib/reports";
@@ -50,6 +50,7 @@ export async function GET(req: NextRequest) {
     switch (key) {
       case "funnel": data = sumFunnel((await run((c) => funnelReport(prisma, c, 30 * 86_400_000, model, windowDays, adAccountId), clientSet)).flat(), "All clients"); clientLabel = "All clients"; break;
       case "ad_perf": data = sumAdPerf((await run((c) => adPerformance(prisma, c, 30 * 86_400_000, "ad", model, windowDays, offerPrice, adAccountId), clientSet)).flat()); clientLabel = "All clients"; break;
+      case "ad_set": data = sumAdSets((await run((c) => adSetPerformance(prisma, c, 30 * 86_400_000, model, windowDays, adAccountId), clientSet)).flat()); clientLabel = "All clients"; break;
       case "wasted_spend": data = sumWasted((await run((c) => wastedSpend(prisma, c, 2000, 30 * 86_400_000, adAccountId), clientSet)).flat()).slice(0, 200); clientLabel = "All clients"; break;
       case "new_vs_old": data = sumNewVsOld((await run((c) => newVsOld(prisma, c, 30 * 86_400_000), clientSet)).flat()); clientLabel = "All clients"; break;
       case "meta_vs_track": data = sumMetaVsTrack((await run((c) => metaVsTrack(prisma, c, 30 * 86_400_000, model, windowDays, adAccountId), clientSet)).flat()); clientLabel = "All clients"; break;
@@ -61,6 +62,7 @@ export async function GET(req: NextRequest) {
     switch (key) {
       case "funnel": data = await funnelReport(prisma, clientId, 30 * 86_400_000, model, windowDays, adAccountId); break;
       case "ad_perf": data = await adPerformance(prisma, clientId, 30 * 86_400_000, "ad", model, windowDays, offerPrice, adAccountId); break;
+      case "ad_set": data = await adSetPerformance(prisma, clientId, 30 * 86_400_000, model, windowDays, adAccountId); break;
       case "wasted_spend": data = await wastedSpend(prisma, clientId, 2000, 30 * 86_400_000, adAccountId); break;
       case "new_vs_old": data = await newVsOld(prisma, clientId, 30 * 86_400_000); break;
       case "meta_vs_track": data = await metaVsTrack(prisma, clientId, 30 * 86_400_000, model, windowDays, adAccountId); break;

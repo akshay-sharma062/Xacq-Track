@@ -1,5 +1,6 @@
 "use client";
 
+import { Suspense } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
 /**
@@ -9,6 +10,16 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
  * 30-day rollup, the only per-day data the Meta API returns — `.meta-probe-
  * findings.txt`); every other choice shows the closest-available data with the
  * honest "30-day rollup only" label on the dashboard, never a sliced number.
+ *
+ * D-10 — `useSearchParams()` REQUIRES a `<Suspense>` boundary: without one, a
+ * client-side range selection (router.replace) triggers the Next.js
+ * "useSearchParams() should be wrapped in a suspense boundary" error and a
+ * full-document CSR bailout. `RangePickerInner` is the real component (it
+ * reads the search params); the exported `RangePicker` wraps it in
+ * `<Suspense>` so every call site (`src/app/page.tsx`) is safe on
+ * client-side navigation. Verified before/after with the sentinel repro
+ * (`scripts/repro-rangepicker.mjs`): unfixed → full reload; fixed → clean
+ * client-side transition (sentinel survives, zero console errors).
  */
 const OPTIONS: { value: string; label: string }[] = [
   { value: "yesterday", label: "Yesterday" },
@@ -23,7 +34,7 @@ function isoToday(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-export function RangePicker() {
+function RangePickerInner() {
   const sp = useSearchParams();
   const router = useRouter();
   const pathname = usePathname();
@@ -81,5 +92,19 @@ export function RangePicker() {
         </>
       )}
     </div>
+  );
+}
+
+/**
+ * D-10: the exported component is the Suspense-bounded wrapper. Call sites
+ * (`src/app/page.tsx`) stay unchanged; the boundary keeps the useSearchParams
+ * invariant safe on every client-side navigation (selecting a range =
+ * router.replace, not a full reload).
+ */
+export function RangePicker() {
+  return (
+    <Suspense fallback={<div className="muted" style={{ fontSize: 12, marginBottom: 8 }}>…</div>}>
+      <RangePickerInner />
+    </Suspense>
   );
 }

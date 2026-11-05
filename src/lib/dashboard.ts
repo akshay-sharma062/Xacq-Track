@@ -4,7 +4,8 @@
  * DB. Everything scopes by `clientId` (spec 10 RLS at the query layer).
  */
 import { PrismaClient } from "./prisma";
-import { funnelReport, sourceMix, adPerformance, AdPerfRow } from "./reports";
+import { funnelReport, sourceMix, adPerformance, adSetPerformance, sumAdSets, AdPerfRow, AdSetRow, LPV_CLPV_NOTE } from "./reports";
+import { resolveLiveRangesForAccounts, LiveRangeResult } from "./meta/live-range";
 import { AttributionModel } from "./types";
 
 const DAY_MS = 86_400_000;
@@ -266,6 +267,17 @@ export interface AllDashboard {
   spendByDay: { label: string; value: number }[];
   topCampaigns: { campaign: string; account: string; spendInr: number }[];
   topAds: AdPerfRow[]; // spend-ranked across all accounts
+  /** D-10: per-ad-set metrics (name/campaign, spend native+INR, impressions,
+   *  reach, clicks, CPM, CPC, ROAS) built from the STORED Spend/AdSet rows
+   *  (never a live call, never an estimate). LPV/CLPV are intentionally
+   *  absent — Meta v23.0 400s them on these accounts (see LPV_CLPV_NOTE). */
+  adSets: AdSetRow[];
+  /** D-10: the on-demand live Meta range rollups for the active range
+   *  (yesterday / 7d only — the two Meta can actually serve on this account),
+   *  per ad account, cache-first (same day+range reuses, no repeated Meta
+   *  hit). A Meta 4xx carries its EXACT string in `blockedNote` (never an
+   *  empty grid). null = no servable live range is active. */
+  liveRanges: LiveRangeResult[] | null;
   capi: {
     queued: number;
     sent: number; // status=sent total (live + simulated)
@@ -384,11 +396,19 @@ export async function dashboardAll(
   const revenueInr = payments.reduce((s, p) => s + (p.status === "paid" ? p.amount : -p.amount), 0);
 
   // Active entity counts (the KPI row's "active campaigns/ads/creatives").
+  // D-10 client-scoping fix: scope by the entities' OWN clientId column (the
+  // pre-D-10 code compared `adAccountId IN clientIds` — a cuid vs a cl_…
+  // mismatch that always returned 0 — and the creatives count scanned ALL
+  // clients' active ads, leaking other clients' entities into the count).
+  const activeAdIds = await prisma.ad.findMany({
+    where: { clientId: { in: clientIds }, status: "ACTIVE" },
+    select: { metaId: true },
+  });
   const [activeCampaigns, activeAds, creatives] = await Promise.all([
-    prisma.adCampaign.count({ where: { adAccountId: { in: clientIds.length ? clientIds : [""] }, status: "ACTIVE" } }),
-    prisma.ad.count({ where: { adAccountId: { in: clientIds.length ? clientIds : [""] }, status: "ACTIVE" } }),
+    prisma.adCampaign.count({ where: { clientId: { in: clientIds }, status: "ACTIVE" } }),
+    prisma.ad.count({ where: { clientId: { in: clientIds }, status: "ACTIVE" } }),
     prisma.creative.count({
-      where: { adMetaId: { in: (await prisma.ad.findMany({ where: { status: "ACTIVE" }, select: { metaId: true } })).map((a) => a.metaId) } },
+      where: { adMetaId: { in: activeAdIds.length ? activeAdIds.map((a) => a.metaId) : [""] } },
     }),
   ]);
   const engagement: EngagementKpis = {
@@ -567,6 +587,29 @@ export async function dashboardAll(
     .sort((a, b) => b.spendInr - a.spendInr)
     .slice(0, 20);
 
+  // -- D-10: per-ad-set metrics table. Source = STORED Spend/AdSet rows only
+  //    (never a live call, never an estimate). Attribution is per-client, so
+  //    run per client and merge across the "All" view; honours the ?adAccount=
+  //    drill-down scope. LPV/CLPV are intentionally NOT columns (Meta v23.0
+  //    400s them on these accounts — the UI shows LPV_CLPV_NOTE, not a guess).
+  const adSets = sumAdSets(
+    await Promise.all(
+      clientIds.map((cid) =>
+        adSetPerformance(prisma, cid, windowDays * DAY_MS, model, windowDays, adAccountId)
+      )
+    )
+  ).slice(0, 20);
+
+  // -- D-10: on-demand LIVE Meta range rollups. Only `yesterday`/`7d` are
+  //    servable on this account (the re-probe showed Meta returns a single
+  //    range rollup for any window, and clamps 365/730d to the stored 30d),
+  //    so those two trigger a server-side fetch (route-level, never the
+  //    browser) cached per account+day; `30d` is the stored pull and
+  //    last_month/last_year keep the stored-rollup label. A Meta 4xx carries
+  //    its EXACT string in blockedNote (a BLOCKED note, never an empty grid).
+  const liveKey = range === "yesterday" ? "yesterday" : range === "7d" ? "7d" : null;
+  const liveRanges = liveKey ? await resolveLiveRangesForAccounts(prisma, acctIds, liveKey) : null;
+
   // -- CAPI pipeline: queued/sent/failed/skipped + match-quality + last 20.
   // G8: split the "sent" rows into LIVE (a real Meta Conversions API POST)
   // vs SIMULATED (no token/pixel -> local mark). Simulate numbers are never
@@ -631,6 +674,8 @@ export async function dashboardAll(
     spendByDay,
     topCampaigns: camRows,
     topAds,
+    adSets,
+    liveRanges,
     capi,
     sync: { dataAsOf: maxPull, fx },
     // D-08: the active range + its data-basis label. null = the default 30d

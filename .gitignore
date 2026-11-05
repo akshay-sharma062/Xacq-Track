@@ -65,3 +65,11 @@ pnpm-debug.log*
 
 # D-09 pull scratch logs
 .d09-pull*.log
+
+# D-10 scratch evidence (distilled findings committed in DECISIONS D-10)
+.d10-*.txt
+.d10-*.log
+.debug-chrome-profile/
+.debug-*.sh
+.debug-*.ps1
+.pre-fix-*.tsx

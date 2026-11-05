@@ -449,3 +449,87 @@ check: `/` + `/meta` + `/?range=yesterday` + `/xt.js` all 200 · backfill
 before/after + re-run evidence above · `pull:once` balance evidence
 (read-only DB reads, above). No pull row deleted; `.env`/`dev.db`/scratch
 never committed.
+
+## D-10 — client exception fix + ad-set metrics + live range fetch (2026-11-05)
+
+**Re-probe first (committed matrix, redacted):** `pnpm range:probe`
+(`scripts/range-probe.ts`, read-only, token redacted; raw findings
+`.d10-range-probe.txt`, gitignored). Confirmed against D-08:
+
+| param (v23.0, act_…2164) | HTTP | rows | spend | verdict |
+|---|---|---|---|---|
+| `time_range` 1d (yesterday) | 200 | 1 | 6,624 | **HONORED** — distinct from 30d |
+| `time_range` 7d | 200 | 1 | 34,379.17 | **HONORED** — distinct from 30d |
+| `time_range` 30d | 200 | 1 | 82,116.98 | the native rollup |
+| `time_range` 365d / 730d | 200 | 1 | 82,116.98 | **CLAMPED** to the 30d value |
+| `period=day` + any range | 200 | 1 | (range rollup) | **IGNORED** — still 1 row |
+| `time_range` empty / since>until | 400 | — | — | BLOCKED: exact #100 strings |
+| ad-level `period=day` + 7d | 200 | 1 | 0.95 | also a rollup, not per-day |
+
+Key conclusion (honest, not guessed): Meta serves a **single range rollup** —
+`time_range` is honored as a window filter, but `period=day` is ignored so
+**no per-day rows exist to fetch**. Only **yesterday** and **7d** are
+distinctly servable (365/730d clamp to the 30d value; last_month/last_year
+keep the stored-rollup label, never a faked year).
+
+**Item 1 — client-side exception: reproduce-first, then the real root cause.**
+The prime suspect (`RangePicker` calling `useSearchParams` without a
+`<Suspense>` boundary → the "should be wrapped in a suspense boundary"
+invariant on client-side navigation) is **fixed canonically regardless**:
+`RangePickerInner`/`TopbarInner` are wrapped by an exported
+`<Suspense>`-wrapping `RangePicker`/`Topbar` (call-site-agnostic; the
+`export function` is the wrapper, the `useSearchParams` core is inside).
+A headless-Chrome/CDP sentinel repro (`scripts/repro-rangepicker.mjs`,
+sentinel + control self-test) on a **clean prod build** showed **0 console
+errors** on load + every RangePicker selection — so on the current build
+the exception did not reproduce. The real recurring breakage was the
+**corrupted `.next` pattern**: a stray `next dev` running next to prod
+`next start`, both writing the shared `.next` (dev-cache
+`client-development-fallback` chunk → `550.js` + `routes-manifest.json`
+ENOENT). Standing rule: **never run `next dev` next to prod**; wiped
+`.next` + clean build + `next start` is the fix. **Auto-respawner verdict:
+NO config-level respawner found** (no nodemon/watchman/scheduled-task/dev
+entry in `.claude/launch.json` — which is now `prod-attach` (url-only), so
+it cannot launch dev). The recurring dev chains came from a **manual user
+terminal tab** running `pnpm dev`; that tab is user-owned and cannot be
+closed from here — flagged for the report.
+
+**Item 2 — ad-set metrics + client scoping.** `adSetPerformance()`
+(`src/lib/reports.ts`) builds the per-ad-set table (name, campaign, spend
+native + INR, impressions, reach, clicks, CPM = spendInr/impressions×1000,
+CPC = spendInr/clicks, ROAS via `aggregateAttribution` where sales exist)
+from **stored Spend/AdSet rows ONLY** (never a live call, never an
+estimate). **LPV/CLPV are NOT columns** — `LPV_CLPV_NOTE` says
+"LPV/CLPV not returned by Meta v23.0 on these accounts (400 on
+lpv/clpv fields — D-08/D-10 probe); not shown; cost/LPV is not
+guessed." Shown on the dashboard + a `/reports` `ad_set` view.
+**Client-scoping bug found + fixed** (`src/lib/dashboard.ts`): the
+active-entity KPI counts compared `adAccountId IN clientIds` (a cuid vs a
+`cl_…` id — always 0) and creatives scanned ALL clients; now
+`activeAdIds` = the client's ACTIVE ad metaIds, and every count is
+`clientId IN clientIds`-scoped. Test (client A selected → **zero** client B
+ad sets; reverse direction too).
+
+**Item 3 — live range fetch ("filter apply = API hit"), server-only.**
+`resolveLiveRange()` (`src/lib/meta/live-range.ts`): a SERVER-ONLY
+on-demand insights fetch for `yesterday`/`7d` (never a Meta call from the
+browser; the dashboard server component calls it). **Per-account,
+per-day cache** in the additive `LiveRange` table (unique
+`adAccountId+rangeKey+day`): same day+range **reuses** the row, no
+repeated Meta hit (idempotent — a 2nd call = 0 Meta hits, tested). A
+Meta 4xx stores the **EXACT error string** as a BLOCKED row (the UI shows
+the note, never an empty grid / fake zero); no token = honest skip
+(stored-rollup label). INR-normalised via the stored daily FX rate
+(`resolveDayRates`; INR = identity). The 30-day Spend rollup fixed point
+is **never written to here** (LiveRange is a separate additive table; no
+deletes). UI: yesterday/7d show a live strip "live, HH:MM IST" (fresh
+<1h) or "cached" for same-day reuse, + a clamped note if Meta served a
+narrower window; unservable ranges (last_month/last_year/custom) keep the
+honest "30-day rollup only" label.
+
+**Verification:** `pnpm typecheck` 0 · `pnpm test` **161/161** (14 files;
++7 D-10: Suspense-wrap invariant ×2, client-scoping A-vs-B, ad-set
+LPV-absent + CPM/CPC math, live-range cache-idempotency, live-range
+BLOCKED-exact-string, no-token-skip) · `pnpm build` 0. No pull row
+deleted; `.env`/`dev.db`/`.next`/scratch (all `.d10-*`, `.debug-*`,
+`.pre-fix-*` now gitignored) never committed.

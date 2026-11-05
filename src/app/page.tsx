@@ -200,6 +200,103 @@ export default async function Dashboard({
         </table>
       </div>
 
+      {/* D-10: on-demand LIVE Meta range strip — only shown when the active
+          range is one Meta can actually serve on this account (yesterday / 7d,
+          per the D-10 re-probe: 365/730d clamp to the stored 30d, so those
+          keep the "30-day rollup only" label above instead). SERVER-ONLY
+          fetch (the dashboard route calls it, never the browser); cached
+          per account+day, so re-selecting the same range does NOT re-hit
+          Meta. A 4xx shows the EXACT Meta string, never an empty grid. */}
+      {d.liveRanges && d.liveRanges.length > 0 && (
+        <div className="card" style={{ padding: "10px 12px" }}>
+          <SectionTitle>
+            {d.liveRanges[0].rangeKey === "yesterday" ? "Live yesterday (Meta)" : "Live 7 days (Meta)"}
+          </SectionTitle>
+          <div className="row spread" style={{ gap: 12, fontSize: 13, flexWrap: "wrap" }}>
+            {d.liveRanges.map((lr) => {
+              if (lr.blockedNote) {
+                return (
+                  <span key={lr.adAccountId} className="badge bad" title={lr.blockedNote}>
+                    {lr.accountName}: BLOCKED — {lr.blockedNote.slice(0, 90)}
+                  </span>
+                );
+              }
+              const when = lr.fetchedAt ? lr.fetchedAt.slice(11, 16) : "—";
+              return (
+                <span key={lr.adAccountId} title={`Meta window ${lr.dateStart}..${lr.dateStop}${lr.clamped ? " (Meta served a narrower window than requested)" : ""}`}>
+                  <b>{lr.accountName}</b>{" "}
+                  <span className="mono good">{inr(lr.spendInr)}</span>{" "}
+                  <span className="faint">
+                    ({lr.currency} {Math.round(lr.spendNative).toLocaleString("en-IN")}) ·{" "}
+                    {lr.fresh ? `live, ${when} IST` : `cached ${when} IST`}
+                    {lr.clamped ? " · Meta served a narrower window than requested" : ""}
+                  </span>
+                </span>
+              );
+            })}
+          </div>
+          <div className="faint" style={{ fontSize: 11, marginTop: 6 }}>
+            On-demand Meta fetch (server-side only, cached per account+day) — the stored 30-day rollup below is unchanged.
+            {d.liveRanges.some((lr) => lr.clamped) && " A clamped window means Meta only has ≤30 days of spend data on this account, so it returned its stored window, not the full requested range."}
+          </div>
+        </div>
+      )}
+
+      {/* D-10: per-ad-set metrics table — STORED Spend/AdSet rows only (never
+          a live call, never an estimate). ROAS is shown only where sales
+          exist (0 pre G3/G4). LPV/CLPV are NOT columns: Meta v23.0 400s them
+          on these accounts (D-08/D-10 probes) → the honest note below,
+          never a zero-column or a guessed cost/LPV. */}
+      <div className="card">
+        <SectionTitle right={<Link className="faint" href="/reports?key=ad_set">Ad-set table →</Link>}>
+          Ad sets by spend (30d, stored)
+        </SectionTitle>
+        <table className="tbl">
+          <thead>
+            <tr>
+              <th>Ad set</th>
+              <th>Campaign</th>
+              <th style={{ textAlign: "right" }}>Spend (native)</th>
+              <th style={{ textAlign: "right" }}>Spend (INR)</th>
+              <th style={{ textAlign: "right" }}>Impressions</th>
+              <th style={{ textAlign: "right" }}>Reach</th>
+              <th style={{ textAlign: "right" }}>Clicks</th>
+              <th style={{ textAlign: "right" }}>CPM</th>
+              <th style={{ textAlign: "right" }}>CPC</th>
+              <th style={{ textAlign: "right" }}>ROAS</th>
+            </tr>
+          </thead>
+          <tbody>
+            {d.adSets.map((r) => (
+              <tr key={r.adsetId}>
+                <td className="mono" style={{ fontSize: 12 }}>{r.adsetName}</td>
+                <td className="faint" style={{ fontSize: 12 }}>{r.campaignName}</td>
+                <td style={{ textAlign: "right" }} className="mono">{r.currency} {r.spendNative.toLocaleString("en-IN")}</td>
+                <td style={{ textAlign: "right" }} className="mono">{inr(r.spendInr)}</td>
+                <td style={{ textAlign: "right" }} className="mono">{r.impressions.toLocaleString("en-IN")}</td>
+                <td style={{ textAlign: "right" }} className="mono">{r.reach.toLocaleString("en-IN")}</td>
+                <td style={{ textAlign: "right" }} className="mono">{r.clicks.toLocaleString("en-IN")}</td>
+                <td style={{ textAlign: "right" }} className="mono">{r.cpm ? inr(r.cpm) : "—"}</td>
+                <td style={{ textAlign: "right" }} className="mono">{r.cpc ? inr(r.cpc) : "—"}</td>
+                <td style={{ textAlign: "right" }} className={r.roas > 0 ? "good mono" : "faint mono"}>
+                  {r.roas > 0 ? r.roas.toFixed(2) + "×" : "— (no sales yet)"}
+                </td>
+              </tr>
+            ))}
+            {d.adSets.length === 0 && (
+              <tr>
+                <td colSpan={10} className="empty">
+                  No stored ad-set spend rows yet.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+        <div className="muted" style={{ fontSize: 11, marginTop: 8 }} title="D-08/D-10 probe: Meta Marketing API v23.0 returns 400 for lpv/clpv fields on these accounts — the note is the committed honest record, not a hidden zero-column.">
+          LPV/CLPV: not returned by Meta v23.0 on these accounts (400 on the fields — D-08/D-10 probes). No cost/LPV is guessed.
+        </div>
+      </div>
+
       {/* §2 E: CAPI pipeline strip (honest zeros until G8 live). */}
       <div className="card">
         <SectionTitle right={<Link className="faint" href="/meta">Details →</Link>}>

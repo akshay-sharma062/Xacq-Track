@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
 interface Persona {
@@ -27,7 +27,7 @@ interface AdAccountOption {
  * switching POSTs to /api/session (sets the cookie) and refreshes; client
  * switching rewrites the URL query so server components re-scope the data.
  */
-export function Topbar({ title, crumb }: { title: string; crumb?: string }) {
+function TopbarInner({ title, crumb }: { title: string; crumb?: string }) {
   const router = useRouter();
   const pathname = usePathname();
   const sp = useSearchParams();
@@ -131,5 +131,19 @@ export function Topbar({ title, crumb }: { title: string; crumb?: string }) {
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * D-10: the exported component is the Suspense-bounded wrapper — call sites
+ * (`<Topbar .../>` on ~10 pages) stay unchanged; the boundary keeps the
+ * useSearchParams invariant safe on every client-side param switch
+ * (client/account/ad-account selects = router.replace, not a full reload).
+ */
+export function Topbar({ title, crumb }: { title: string; crumb?: string }) {
+  return (
+    <Suspense fallback={null}>
+      <TopbarInner title={title} crumb={crumb} />
+    </Suspense>
   );
 }

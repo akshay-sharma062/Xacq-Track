@@ -241,6 +241,132 @@ export async function adPerformance(
 }
 
 // ---------------------------------------------------------------------------
+// 2b) AD-SET metrics (D-10): per-ad-set name/campaign, spend (native + INR),
+//     impressions, reach, clicks, CPM, CPC, ROAS (where sales exist).
+//     Source = STORED Spend rows joined to the Ad/AdSet/Campaign/AdAccount
+//     tree (spec: "Source = stored Spend/AdSet rows only" — never a live
+//     Meta call, never an estimate).
+//
+//     LPV/CLPV: NOT available — the D-08/D-10 probes 400'd `lpv`/`clpv`
+//     ("not valid for fields param") at ad AND account level on this API
+//     version (v23.0). We therefore expose NO lpv/clpv columns and no
+//     cost/LPV figure — the UI shows the honest note LPV_CLPV_NOTE instead
+//     of a zero-column or a guessed value.
+// ---------------------------------------------------------------------------
+/** D-10: the honest LPV/CLPV note the UI renders on the ad-set table
+ *  (probe-proven: Meta v23.0 400s lpv/clpv on these accounts — D-08/D-10). */
+export const LPV_CLPV_NOTE =
+  "LPV/CLPV not returned by Meta v23.0 on these accounts (400 on lpv/clpv fields — D-08/D-10 probe). Not shown; cost/LPV is not guessed.";
+
+export interface AdSetRow {
+  adsetId: string;
+  adsetName: string;
+  campaignId: string;
+  campaignName: string;
+  accountName: string;
+  currency: string; // the ad account's billing currency (native spend unit)
+  spendNative: number;
+  spendInr: number;
+  impressions: number;
+  reach: number;
+  clicks: number;
+  cpm: number; // spendInr / impressions * 1000 (0 when no impressions)
+  cpc: number; // spendInr / clicks (0 when no clicks)
+  revenueInr: number; // sales attributed to this ad-set (0 pre G3/G4 = honest)
+  roas: number; // revenueInr / spendInr (0 when no spend)
+}
+
+export async function adSetPerformance(
+  prisma: PrismaClient,
+  clientId: string,
+  rangeMs = 30 * DAY_MS,
+  model: AttributionModel = "last_paid_click",
+  windowDays = 30,
+  adAccountId?: string
+): Promise<AdSetRow[]> {
+  // Stored Spend rows for the client (optionally one ad account), joined to
+  // the ad tree (the ONLY source — D-10 "stored Spend/AdSet rows only").
+  const spendRows = await prisma.spend.findMany({
+    where: { clientId, day: { gte: dayStr(Date.now() - rangeMs) }, ...(adAccountId ? { adAccountId } : {}) },
+    include: { ad: { include: { adSet: { include: { campaign: true, adAccount: true } } } } },
+  });
+
+  // Sales attribution per ad-set (adset-level buckets keyed by ad-set metaId).
+  const { sales } = await salesForClient(prisma, clientId, rangeMs);
+  const buckets = aggregateAttribution(
+    { sales: sales.map((s) => ({ leadId: s.leadId, saleTime: s.saleTime, amount: s.amount, clicks: s.clicks, firstFormFill: s.firstFormFill })), model, windowDays },
+    "adset"
+  );
+  const credit = new Map(buckets.map((b) => [b.key, b]));
+
+  // Group Spend rows by ad-set, summing native + INR + engagement.
+  const bySet = new Map<string, AdSetRow & { byCurrency: Map<string, number> }>();
+  for (const r of spendRows) {
+    const set = r.ad?.adSet;
+    if (!set) continue;
+    const key = set.metaId;
+    let row = bySet.get(key);
+    if (!row) {
+      row = {
+        adsetId: key,
+        adsetName: set.name,
+        campaignId: set.campaign?.metaId ?? "",
+        campaignName: set.campaign?.name ?? "",
+        accountName: set.adAccount?.name ?? "",
+        currency: (r.currency || "INR").toUpperCase(),
+        spendNative: 0,
+        spendInr: 0,
+        impressions: 0,
+        reach: 0,
+        clicks: 0,
+        cpm: 0,
+        cpc: 0,
+        revenueInr: 0,
+        roas: 0,
+        byCurrency: new Map<string, number>(),
+      };
+      bySet.set(key, row);
+    }
+    row.spendNative += r.spend ?? 0;
+    row.spendInr += r.inrSpend ?? 0;
+    row.impressions += r.impressions ?? 0;
+    row.reach += r.reach ?? 0;
+    row.clicks += r.clicks ?? 0;
+    const cur = (r.currency || "INR").toUpperCase();
+    row.byCurrency.set(cur, (row.byCurrency.get(cur) ?? 0) + (r.spend ?? 0));
+  }
+
+  const rows: AdSetRow[] = [...bySet.values()].map((raw) => {
+    const { byCurrency, ...row } = raw;
+    const c = credit.get(row.adsetId);
+    row.revenueInr = round(c?.shareRevenue ?? 0);
+    row.spendNative = round(row.spendNative);
+    row.spendInr = round(row.spendInr);
+    row.impressions = Math.round(row.impressions);
+    row.reach = Math.round(row.reach);
+    row.clicks = Math.round(row.clicks);
+    row.cpm = row.impressions ? round((row.spendInr / row.impressions) * 1000) : 0;
+    row.cpc = row.clicks ? round(row.spendInr / row.clicks) : 0;
+    row.roas = row.spendInr ? round(row.revenueInr / row.spendInr) : 0;
+    return row;
+  });
+  return rows.sort((a, b) => b.spendInr - a.spendInr);
+}
+
+/** Concat + dedup a set of ad-set tables across the "All clients" view.
+ *  Accepts a flat list or a per-client nested list (the "All" view runs
+ *  adSetPerformance per client and merges). */
+export function sumAdSets(rows: AdSetRow[] | AdSetRow[][]): AdSetRow[] {
+  const flat = (rows as unknown as AdSetRow[][]).flat();
+  const seen = new Map<string, AdSetRow>();
+  for (const r of flat) {
+    const prev = seen.get(r.adsetId);
+    if (!prev || r.spendInr > prev.spendInr) seen.set(r.adsetId, r);
+  }
+  return [...seen.values()].sort((a, b) => b.spendInr - a.spendInr);
+}
+
+// ---------------------------------------------------------------------------
 // 3) WASTED SPEND (spec 7): ads above a spend threshold with ZERO sales.
 // ---------------------------------------------------------------------------
 export interface WastedRow {

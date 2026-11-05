@@ -21,6 +21,7 @@
     "meta:verify-token": "node scripts/verify-meta-token.mjs",
     "capi:replay": "tsx scripts/g8-replay.ts",
     "meta:probe": "tsx scripts/meta-probe.ts",
+    "range:probe": "tsx scripts/range-probe.ts",
     "fx:backfill": "tsx scripts/fx-backfill.ts",
     "balance:check": "tsx scripts/balance-check.ts"
   },

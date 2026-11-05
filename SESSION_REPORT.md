@@ -420,3 +420,82 @@ row deleted; `.env`/`dev.db`/scratch never committed.
 **Next gate:** **G3 live traffic (PO paste)** — paste the refreshed snippet on
 `join.upcurvv.com/cll` + ~20 real Meta ad clicks → the real EMQ≥7 proof and
 the ≥95% ad_id/UTM gate. Then G9/G10/G11.
+
+## D-10 — client exception fix + ad-set metrics + live range fetch (2026-11-05) [REVIEW]
+Ticket: "client exception fix + ad-set metrics + live range fetch" —
+reproduce the client exception first, then add per-ad-set metrics,
+honest client scoping, and a server-only live-range fetch with a
+per-account/per-day cache.
+
+**Re-probe first (committed matrix, redacted):** `pnpm range:probe`
+read-only re-probe confirmed D-08's capability matrix against the live
+account: `time_range` (well-formed JSON) IS honored as a range window
+(yesterday=6,624 · 7d=34,379.17 · 30d=82,116.98, distinct values);
+365d/730d **clamp** to the 30d value; `period=day` is **ignored**
+(always rows=1 → Meta serves one range rollup, not per-day rows);
+empty/reversed `time_range` = 400 exact `#100` strings. So only
+**yesterday/7d** are on-demand servable; last_month/last_year/custom keep
+the honest stored-rollup label. Never faked, never zero-padded.
+
+**1. Client-side exception (reproduce-first):** the prime suspect —
+`RangePicker`/`Topbar` call `useSearchParams` without a `<Suspense>`
+boundary (invariant + CSR full-reload bailout on client-side nav) — was
+fixed canonically by wrapping the `useSearchParams` core in an exported
+`<Suspense>`-wrapping component (call-site-agnostic). A headless-Chrome/CDP
+sentinel repro on a clean prod build showed **0 console errors** on load +
+every RangePicker selection, so on the current build the exception did not
+reproduce; the recurring breakage was the **corrupted `.next` pattern** (a
+stray `next dev` running next to prod `next start`, both writing the shared
+`.next` → `550.js` / `routes-manifest.json` ENOENT). Fix: wipe `.next`,
+clean build, `next start`; standing rule **never run `next dev` next to
+prod**. **Auto-respawner verdict: no config-level respawner found** (no
+nodemon/watchman/scheduled-task/dev entry in `.claude/launch.json`, now
+`prod-attach` url-only so it can't launch dev). The recurring dev chains
+came from a **manual user terminal tab** running `pnpm dev`; that tab is
+user-owned, cannot be closed from here, flagged for the report.
+
+**2. Ad-set metrics + client scoping:** `adSetPerformance()`
+(`src/lib/reports.ts`) builds the per-ad-set table (name, campaign, spend
+native+INR, impressions, reach, clicks, CPM, CPC, ROAS where sales exist)
+from **stored Spend/AdSet rows ONLY**. **LPV/CLPV are NOT columns** —
+`LPV_CLPV_NOTE` says "LPV/CLPV not returned by Meta v23.0 on these
+accounts (400 on lpv/clpv fields — D-08/D-10 probe); not shown; cost/LPV
+is not guessed." Shown on the dashboard + a `/reports` `ad_set` view.
+**Client-scoping bug found + fixed** (`src/lib/dashboard.ts`): the
+active-entity KPI counts compared `adAccountId IN clientIds` (cuid vs
+`cl_…` — always 0) and creatives scanned ALL clients; now scoped by
+`clientId IN clientIds` + the client's ACTIVE ad metaIds. Test: client A
+selected → **zero** client B ad sets (and the reverse).
+
+**3. Live range fetch ("filter apply = API hit"), server-only:**
+`resolveLiveRange()` (`src/lib/meta/live-range.ts`) — a SERVER-ONLY
+on-demand insights fetch for `yesterday`/`7d` (never a Meta call from the
+browser). **Per-account, per-day cache** in the additive `LiveRange`
+table (unique `adAccountId+rangeKey+day`): same day+range **reuses** the
+row, no repeated Meta hit (idempotent — 2nd call = 0 Meta hits, tested).
+A Meta 4xx stores the **EXACT error string** as a BLOCKED row (the UI
+shows the note, never an empty grid / fake zero); no token = honest skip.
+INR-normalised via the stored daily FX rate. The 30-day Spend rollup
+fixed point is **never written to here** (LiveRange is a separate
+additive table; no deletes). UI: yesterday/7d show a live strip
+"live, HH:MM IST" (fresh <1h) or "cached" for same-day reuse;
+unservable ranges keep the "30-day rollup only" label.
+
+**Verification:** `pnpm typecheck` 0 · `pnpm test` **161/161** (14 files;
++7 D-10: Suspense-wrap ×2, client-scoping A-vs-B, ad-set LPV-absent +
+CPM/CPC math, live-range cache-idempotency, live-range BLOCKED-exact,
+no-token-skip) · `pnpm build` 0 · live routes `/`, `/meta`,
+`/?range=yesterday`, `/?range=yesterday&client=<id>` 200 (re-verified
+below). No pull row deleted; `.env`/`dev.db`/`.next`/scratch (`.d10-*`,
+`.debug-*`, `.pre-fix-*` now gitignored) never committed.
+
+**Next gate + live host + respawner verdict:** live host =
+`https://vegas-legacy-fully-presenting.trycloudflare.com` (re-verified
+HTTP 200 end-to-end 2026-11-05; prior `oak-…`/`naval-…` subdomains dead
+= 000). **Auto-respawner: NO config-level respawner found or to stop —
+the recurring `next dev` chains came from a manual user terminal tab
+(user-owned, flagged not closable from here); `.claude/launch.json` is
+now `prod-attach` url-only so the app itself cannot launch dev.**
+**Next gate = G3 live traffic (PO paste)** — the refreshed snippet (D-09)
+is paste-ready on `join.upcurvv.com/cll`; ~20 real Meta ad clicks unlock
+the real EMQ≥7 proof + the ≥95% ad_id/UTM gate, then G9/G10/G11.

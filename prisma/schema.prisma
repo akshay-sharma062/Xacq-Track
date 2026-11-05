@@ -306,7 +306,8 @@ model AdAccount {
   balance     Float?
   balanceAsOf DateTime?
 
-  campaigns AdCampaign[]
+  liveRanges  LiveRange[]
+  campaigns   AdCampaign[]
   adsets    AdSet[]
   ads       Ad[]
   spend     Spend[]
@@ -417,6 +418,54 @@ model FxRate {
 
   @@unique([date, currency])
   @@index([currency, date])
+}
+
+// ---------------------------------------------------------------------------
+// LiveRange (D-10) — on-demand Meta insights RANGE ROLLUP cache, per
+// (ad account, range). The D-10 re-probe settled that on this account/API
+// Meta's `time_range` returns a single range rollup (one row, the window's
+// date_start..date_stop aggregate) — NOT per-day rows (period=day is
+// ignored). So this table stores the servable shape: one rollup per
+// (adAccountId, rangeKey) per calendar day, with an hourly TTL so a second
+// hit the same day+range REUSES the cached row (no repeated Meta call —
+// the ticket's "per-account, per-day cache"). Rows are ADDITIVE: they live
+// in their own table, so the Spend 3,818-row fixed point is never touched
+// and per-day Spend rows are never deleted.
+//
+// Honesty (no fake numbers): `fetchedAt` is when the Meta call succeeded;
+// the UI labels a live value "live, HH:MM IST" off this stamp. When Meta
+// 4xx's, `blockedNote` holds the EXACT Meta error string and no value is
+// stored (the UI shows a BLOCKED note, never an empty grid). A clamped
+// window (Meta serves ≤30d of spend; 365d/730d roll up to the 30d value —
+// D-10 probe) is recorded via `rangeKey` so the UI can say "Meta served the
+// stored 30d window, not a year" instead of faking a longer window.
+// ---------------------------------------------------------------------------
+model LiveRange {
+  id        String  @id @default(cuid())
+  adAccountId String
+  adAccount AdAccount @relation(fields: [adAccountId], references: [id])
+  // "yesterday" | "7d" — the servable on-demand ranges (per the D-10 probe;
+  // 30d is already the stored pull, last_month/last_year stay rollup-labeled).
+  rangeKey  String
+  // which calendar day (UTC) this cache entry applies to — the "per-day"
+  // dimension of the per-account/per-day cache.
+  day       String // "YYYY-MM-DD"
+  // Meta's rollup window + values (billing currency + INR-normalised).
+  dateStart String // window's date_start (Meta's, not our requested one when clamped)
+  dateStop  String // window's date_stop
+  spend     Float  // native currency rollup total
+  spendInr  Float  // INR-normalised (stored daily FX rate, spec 5.7)
+  impressions Float
+  reach     Float
+  clicks    Float
+  // provenance + honesty
+  fetchedAt DateTime @default(now())
+  // when Meta 4xx'd: the exact error string (then the value fields stay 0/null
+  // and the UI shows BLOCKED, not a number).
+  blockedNote String?
+
+  @@unique([adAccountId, rangeKey, day])
+  @@index([adAccountId, rangeKey])
 }
 
 // ---------------------------------------------------------------------------
