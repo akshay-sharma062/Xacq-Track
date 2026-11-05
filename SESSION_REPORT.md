@@ -499,3 +499,88 @@ now `prod-attach` url-only so the app itself cannot launch dev.**
 **Next gate = G3 live traffic (PO paste)** — the refreshed snippet (D-09)
 is paste-ready on `join.upcurvv.com/cll`; ~20 real Meta ad clicks unlock
 the real EMQ≥7 proof + the ≥95% ad_id/UTM gate, then G9/G10/G11.
+
+## D-11 — CAPI 400 "Object with ID 'pixel'" (2026-11-05) [REVIEW]
+Ticket: "CAPI 400: literal 'pixel' string sent to Meta instead of the
+numeric pixel id" — every CAPI event (Purchase, Schedule, Attended,
+CompleteRegistration, Lead) 400'd with Meta's exact
+`"Unsupported post request. Object with ID 'pixel' does not exist …"`.
+
+**Root cause (hunted in the ticket's order, not guessed):** no literal
+`"pixel"` value exists in committed code — G0 had *no live CAPI POST at
+all* (`postOneCapiEvent` + the `graph.facebook.com/<ver>/<pixel>/events`
+URL only exist from G8 `ee7c913`; `git log -S'"pixel"'` touches only G8 +
+G0; `.env` pixels are numeric; `Client.metaPixelId` null for all 7; the
+route reads `.env` only via value-free `pixelForClient`). The 15 failed
+rows are stamped **2026-11-03** (G4/G8 replay era) and carry a **stale**
+400 string persisted to `OutboundEvent.error` back when the pixel value
+was still the placeholder word `pixel` (the numeric `.env` values were
+entered G8-day, Nov 4). Those rows were **never re-run** after the fix
+landed, so the CAPI screen kept showing the old 400s (all 45 rows had
+`pixelUsed=null`; `sendQueue` records it on success only). The real
+defect: **no send-boundary guard** — any placeholder could 400 again.
+
+**The fix (`src/lib/meta/capi.ts` + `src/lib/capi.ts`):**
+1. `isValidMetaPixelId()` — a pixel must be a numeric string, 6–20 digits
+   (Meta pixel/dataset-id shape). A **type predicate** (narrows to
+   `string`).
+2. `sendQueue`: `!token || !isValidMetaPixelId(pixel)` → **SIMULATE**
+   (local mark, no network, `simulated=true`, `pixelUsed=null`, an exact
+   note naming the rejected value) — a placeholder is never POSTed and
+   never recorded as "the pixel used".
+3. `postOneCapiEvent`: a **second boundary guard** (the shared primitive
+   `g8-replay.ts` also calls) rejects a non-numeric pixel with a
+   clear, non-network `ok:false` error.
+4. **Action-source rule (the live re-run's honest next wall):** the
+   replay with the numeric pixel returned **Meta 200 + fbtrace_id
+   `Ab_zLGf_…`**, but the 6 pixel-bearing clients' queue re-run hit a
+   *different* honest 400 — subcode **2804039** "Invalid action source
+   … such as 'website'" (Meta 400 recorded since G8): these pixels only
+   accept a web (`website`) source, which REQUIRES `event_source_url`,
+   and **no client has a Funnel row** (0 Funnel rows in the DB) → no
+   source URL exists and none is fabricated. So: `toMetaWireEvent` drops
+   the web-only `user_data` signals (`client_ip_address` /
+   `client_user_agent`) on a non-web `"system"` source (the identity
+   match signals `ph/em/fbc/fbp` stay — they drive EMQ regardless of
+   source), and `sendQueue` gates the live POST: **no source URL → stay
+   SIMULATED with the exact note** (Meta-invalid events are never POSTed
+   → no 400 loop); it re-activates automatically once the client's
+   default Funnel has a landing URL (`eventSourceUrl` is an injectable
+   opt, so the rule is unit-tested both ways).
+5. **Re-run + regression tests:** all 7 clients re-run through
+   `POST /api/capi` on the prod build: `cl_piyush-ahuja` (no pixel
+   key) → 5/5 simulated, no network; the 6 pixel-bearing clients →
+   simulated with the exact no-URL note. OutboundEvent end state:
+   **sent=44 · skipped=1 · failed=0**, and **0 rows still carry the
+   literal `'pixel'` error string**. 8 new regression tests
+   (`isValidMetaPixelId` matrix, placeholder→simulate no-network,
+   boundary-reject, `.env`-numeric-URL flow-through,
+   settings-placeholder reject, no-URL→simulate note, URL→live POST,
+   web-signals-kept on a website source).
+
+**Verification:** `pnpm typecheck` 0 · `pnpm test` **169/169** (14 files;
++8 D-11) · `pnpm build` 0 · live re-run above · `pnpm capi:replay`
+= Meta HTTP 200 + fbtrace_id (labelled synthetic, EMQ≥7 stays gated on
+G3-matched traffic — never claimed here). Guardrails: no pull row
+touched (fixed point ad=3818/adSet=1177/spend=3818, WAL intact);
+`.env`/`dev.db`/`.next`/scratch (`.d11-*` now gitignored) never
+committed; secrets stay in `.env`.
+
+**D-11 note on the environment:** while verifying, a stray `next dev`
+chain (user terminal tab 4, `npm run dev` on :3001 sharing `.next` with
+prod — the D-10 corruption pattern, 550.js / routes-manifest ENOENT)
+was **found in user Terminal 4 and stopped at the source** (the whole
+`npm run dev` process tree, PID 1552→2980→18396→26436, killed; the
+user-owned tab itself stays open — only its command was stopped). The
+D-10 verdict ("manual user terminal tab, cannot be closed from here")
+is now confirmed live and the command is stopped; the standing rule
+holds: **never run `next dev` next to prod**.
+
+**Next gate = G3 live traffic + first Funnel landing URL per client.**
+The live CAPI path is unblocked by DATA, not code: (a) the numeric
+pixel — DONE (verified against Meta with the replay 200); (b) a web
+source URL — the client's default Funnel `landingUrls` (0 today) or an
+explicit `eventSourceUrl`. Once either exists, the 39 simulated rows
+flip to live Meta 200s on the next queue run with **no code change**.
+EMQ≥7 on Purchase still requires G3-matched browser-pixel traffic (the
+refreshed D-09 snippet, paste-ready on `join.upcurvv.com/cll`).

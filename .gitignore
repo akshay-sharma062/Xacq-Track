@@ -73,3 +73,6 @@ pnpm-debug.log*
 .debug-*.sh
 .debug-*.ps1
 .pre-fix-*.tsx
+
+# D-11 scratch evidence (distilled findings committed in DECISIONS D-11)
+.d11-*

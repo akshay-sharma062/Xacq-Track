@@ -533,3 +533,76 @@ LPV-absent + CPM/CPC math, live-range cache-idempotency, live-range
 BLOCKED-exact-string, no-token-skip) · `pnpm build` 0. No pull row
 deleted; `.env`/`dev.db`/`.next`/scratch (all `.d10-*`, `.debug-*`,
 `.pre-fix-*` now gitignored) never committed.
+
+## D-11 — CAPI 400 "Object with ID 'pixel'": placeholder guard + numeric-pixel send boundary (2026-11-05)
+
+**Root cause (hunted, not guessed):** the literal word `pixel` was **never
+in committed code as a value** — G0 had no live CAPI POST at all
+(`postOneCapiEvent` + the `graph.facebook.com/<ver>/<pixel>/events` URL
+only exist from G8 `ee7c913`; `git log -S'"pixel"'` touches only G8 + G0).
+The 15 failed `OutboundEvent` rows are stamped **2026-11-03** (the G4/G8
+replay era) and carry a **stale** Meta 400
+`"Unsupported post request. Object with ID 'pixel' does not exist"` — that
+400 was persisted to `error` back when the pixel value was still the
+placeholder word `pixel` (the `.env` numeric values were entered G8-day,
+Nov 4; `git log` proves the route/pixel-map have not changed since).
+Those rows were **never re-run** after the fix landed, so the CAPI screen
+still displayed the old 400s. All 45 rows had `pixelUsed=null`
+(`sendQueue` only records `pixelUsed` on success), and every
+`Client.metaPixelId` was null — the literal was not in the DB either.
+The real defect: **no guard at the send boundary** — any placeholder
+(`"pixel"`, too short, empty) could reach Meta again and 400.
+
+**The fix (send boundary, `src/lib/meta/capi.ts`):**
+- `isValidMetaPixelId()` — a pixel must be a **numeric string, 6–20 digits**
+  (Meta pixel/dataset-id shape). A type predicate, so a valid id narrows
+  to `string` for the live URL.
+- `sendQueue`: `!token || !isValidMetaPixelId(pixel)` → **SIMULATE** (local
+  mark, no network, `simulated=true`, `pixelUsed=null`, an exact note that
+  names the rejected value) — a placeholder is never POSTed, and a
+  placeholder is never recorded as "the pixel used".
+- `postOneCapiEvent`: a **second, belt-and-suspenders guard** rejects a
+  non-numeric pixel with a clear, non-network `ok:false` error (this
+  primitive is also called directly by `scripts/g8-replay.ts`).
+- **Action-source rule (the live re-run's honest next wall):** Meta
+  subcode **2804039** on these pixels rejects the non-web `"system"`
+  source ("…such as 'website'") — a "website" source REQUIRES
+  `event_source_url`, and a source URL is **never fabricated**.
+  `toMetaWireEvent` now omits the web-only `user_data` signals
+  (`client_ip_address`/`client_user_agent`) on a non-web source (the
+  identity match signals `ph/em/fbc/fbp` are kept). And `sendQueue`
+  gates the live POST: **no funnel source URL for the client → stay
+  SIMULATED with the exact note**, re-activating automatically once the
+  client's default Funnel has a landing URL (`eventSourceUrl` is
+  injectable, so the rule is unit-tested both ways). The G4-era rows
+  have **zero Funnel rows**, so the live CAPI path for this backlog is
+  genuinely not unblocked by data yet — that is stated, not papered over.
+
+**Proof (live re-run, 2026-11-05, `pnpm capi:replay` + `POST /api/capi`
+for all 7 clients on the prod build):** the `'pixel'` 400 is **gone** —
+pixel-bearing clients reach Meta with the numeric `.env` pixel (the error
+changed to the subcode-2804039 action-source 400, which carries a
+`fbtrace_id` = Meta accepted the pixel in the URL). `cl_piyush-ahuja`
+(no pixel key) → 5/5 simulated, no network. The labelled synthetic
+replay on `cl_upcurvv`'s real numeric pixel returned **Meta HTTP 200 +
+fbtrace_id `Ab_zLGf_…`** (the wire path is proven end-to-end; the 200
+carried no hub-log event_id / EMQ — same honest caveat as G8, the
+EMQ≥7 bar stays gated on G3-matched traffic). After the action-source
+rule landed, the full backlog re-run left **every row in a terminal,
+honest state: sent=44 (simulated, exact notes) · skipped=1 · failed=0**,
+and **0 rows still carry the literal `'pixel'` error string**.
+
+**Verification:** `pnpm typecheck` 0 · `pnpm test` **169/169** (14 files;
++8 D-11: isValidMetaPixelId, placeholder→simulate no-network,
+boundary-reject, .env-numeric-URL flow-through, settings-placeholder
+reject, no-URL→simulate note, URL→live POST, web-signals-kept-on-website)
+· `pnpm build` 0 · live re-run above. No pull row touched
+(fixed point ad=3818/adSet=1177/spend=3818, WAL intact); `.env`/`dev.db`/
+`.next`/scratch (`.d11-*` now gitignored) never committed.
+
+**Unblocking the live path (data, not code):** a valid LIVE CAPI POST
+needs (a) the numeric pixel — DONE — and (b) a web source URL: the
+client's default Funnel `landingUrls` (or an explicit `eventSourceUrl`).
+Next gate: **first Funnel landing URL per client → the 39 simulated
+rows flip to live Meta 200s automatically on the next queue run**
+(alongside G3 live traffic for the EMQ≥7 proof).

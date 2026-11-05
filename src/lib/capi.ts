@@ -248,6 +248,19 @@ export function toMetaWireEvent(
   // valid on its own and needs no URL. `event_source` was an internal label,
   // not a Meta field, so it never leaks into the wire object.
   const isWebSource = Boolean(ev.eventSourceUrl);
+  // D-11: a NON-web ("system") action source must not carry WEB-only
+  // user_data signals (client_ip_address / client_user_agent) — Meta 400s
+  // them on a non-web source (subcode 2804039 "…such as 'website'"; the
+  // G4-era rows have no Funnel landing URL, so they fall to "system" while
+  // still carrying a web ip/ua → the 400). The identity match signals
+  // (ph/em/fbc/fbp) are KEPT — they drive EMQ regardless of source. Web
+  // signals are only sent on a "website" source (which pairs with
+  // event_source_url). No value is fabricated either way.
+  const wireUserData: Record<string, unknown> = { ...ev.userData };
+  if (!isWebSource) {
+    delete wireUserData.client_ip_address;
+    delete wireUserData.client_user_agent;
+  }
   const wire: Record<string, unknown> = {
     // G8: Meta's required event-name field (standard names for standard
     // events, our custom name for Attended).
@@ -257,7 +270,7 @@ export function toMetaWireEvent(
     // event_id (our stable dedup hash) is how Meta dedups against the
     // browser pixel that emitted the same event_id.
     event_id: wireEventId ?? ev.eventId,
-    user_data: ev.userData,
+    user_data: wireUserData,
     action_source: isWebSource ? CAPI_ACTION_SOURCE : "system",
   };
   if (isWebSource) wire.event_source_url = ev.eventSourceUrl;

@@ -16,12 +16,27 @@ import { buildCapiEvent, shouldSendPurchase, toMetaWireEvent, normalizeMetaEmq, 
 import { CapiIdentity, CapiEventType } from "../types";
 
 /**
+ * D-11 — send-boundary pixel validation. Meta's Conversions API pixel /
+ * data-source ids are NUMERIC strings (10–18 digits). Anything else — the
+ * G4-era placeholder word "pixel", a too-short id, an empty value — is
+ * REJECTED before any network call so a placeholder can never reach Meta and
+ * 400 again ("Unsupported post request. Object with ID 'pixel' does not
+ * exist" was the stale G4 400 persisted on the Nov-3 OutboundEvent rows).
+ */
+export function isValidMetaPixelId(v: unknown): v is string {
+  return typeof v === "string" && /^[0-9]{6,20}$/.test(v.trim());
+}
+
+/**
  * A CAPI send mode:
- *  - "live"     -> META_ACCESS_TOKEN + a per-client pixel are present: a REAL
- *                  POST to Meta's Conversions API. EMQ + ack are read back.
- *  - "simulate" -> token or pixel absent: mark sent locally, NO network.
- *                  (Never a canned live-success — `simulated` is set so the
- *                  dashboard can't present it as live.)
+ *  - "live"     -> META_ACCESS_TOKEN + a valid numeric per-client pixel are
+ *                  present: a REAL POST to Meta's Conversions API. EMQ + ack
+ *                  are read back.
+ *  - "simulate" -> token absent, OR the pixel is absent/invalid (D-11:
+ *                  a placeholder pixel like "pixel" is rejected, not sent):
+ *                  mark sent locally, NO network. (Never a canned
+ *                  live-success — `simulated` is set so the dashboard can't
+ *                  present it as live.)
  */
 export interface SendOutcome {
   total: number;
@@ -60,6 +75,13 @@ export async function sendQueue(
     apiVersion?: string;
     now?: Date;
     fetch?: typeof fetch;
+    /** D-11: explicit web source URL for this client's events. When set,
+     *  events carry action_source "website" + event_source_url (Meta's
+     *  required pairing); when absent, the default Funnel landing URL is
+     *  used; when neither exists, a live POST would be Meta-invalid (2804039)
+     *  → the queue stays simulated with a note (never POSTs a no-URL
+     *  "system" event, never fakes a URL). Injectable so the rule is testable. */
+    eventSourceUrl?: string | null;
   } = {}
 ): Promise<SendOutcome> {
   const {
@@ -79,17 +101,20 @@ export async function sendQueue(
   const out: SendOutcome = { total: rows.length, sent: 0, failed: 0, skipped: 0, simulated: 0, live: 0, errors: [] };
   if (rows.length === 0) return out;
 
-  // G8 (D-07): the WEB source for this client's CAPI events. Meta requires
-  // `event_source_url` alongside a web `action_source` — so we pair them from
-  // the client's DEFAULT funnel's first landing URL (a real value, never
-  // fabricated). If the client has no funnel landing URL, `eventSourceUrl`
-  // stays undefined and the wire event falls back to the non-web "system"
-  // source (still a valid, accepted CAPI shape).
+  // G8 (D-07) + D-11: the WEB source for this client's CAPI events. Meta
+  // requires `event_source_url` alongside a web `action_source` — so we pair
+  // them from the client's DEFAULT funnel's first landing URL (a real value,
+  // never fabricated). If the client has no funnel landing URL, `eventSourceUrl`
+  // stays undefined and — D-11 — a live POST is NOT made (Meta's subcode
+  // 2804039 rejects the "system" fallback these pixels only accept "website"
+  // for): the queue stays simulated with an explicit note instead.
   const funnel = await prisma.funnel.findFirst({
     where: { clientId, default: true },
     select: { landingUrls: true },
   });
-  const eventSourceUrl = (() => {
+  // D-11: an explicitly injected source URL (tests / callers) wins; else the
+  // client's default Funnel landing URL (the real value, never fabricated).
+  const eventSourceUrl = opts.eventSourceUrl ?? (() => {
     // Funnel.landingUrls is a JSON array (schema:88, e.g. '["https://…/w1"]').
     if (!funnel?.landingUrls) return undefined;
     let urls: string[];
@@ -152,27 +177,55 @@ export async function sendQueue(
     });
     const wireEvent = toMetaWireEvent(payload, capiWireEventId(row.dedupKey));
 
-    if (!metaAccessToken || !metaPixelId) {
-      // Simulate (no token AND/OR no pixel): mark sent locally, no network.
-      // Never a canned live-success — the row is flagged simulated so the
-      // dashboard / reports cannot read it as a Meta send.
+    if (!metaAccessToken || !isValidMetaPixelId(metaPixelId)) {
+      // Simulate (no token OR a pixel that is absent/NOT a valid numeric
+      // Meta id — D-11). A placeholder like "pixel" must NEVER be POSTed to
+      // Meta (that was the stale G4 400 "Object with ID 'pixel' does not
+      // exist"): we mark the row sent locally and say exactly why, so the
+      // dashboard shows a simulate note, not a fake live-success.
+      const reason = !metaAccessToken
+        ? "simulate: no META_ACCESS_TOKEN (local mark, no network)"
+        : !metaPixelId
+          ? "simulate: no pixel configured for this client (local mark, no network)"
+          : `simulate: pixel '${metaPixelId}' is not a valid numeric Meta pixel/dataset id — placeholder rejected at the send boundary, never POSTed to Meta (local mark, no network)`;
       await prisma.outboundEvent.update({
         where: { id: row.id },
         data: {
           status: "sent",
           simulated: true,
           sentAt: now,
-          error: null,
-          pixelUsed: metaPixelId ?? null,
+          error: reason,
+          pixelUsed: null, // never record a placeholder as "the pixel used"
         },
       });
       out.sent++;
       out.simulated++;
+      out.errors.push(`${row.dedupKey}: ${reason}`);
       continue;
     }
 
-    // LIVE send to Meta's Conversions API (real pixel, real token) — via the
-    // shared postOneCapiEvent primitive (also used by scripts/g8-replay.ts).
+    // D-11: a live send with NO source URL is Meta-invalid on these pixels —
+    // G8/D-07 record + this run's live 400: Meta subcode 2804039 rejects the
+    // non-web "system" action_source and prescribes "website", which REQUIRES
+    // event_source_url. A source URL is never fabricated. So: no URL → stay
+    // SIMULATED with an explicit note (the ticket's "or stay simulated with a
+    // note" branch), retriable once the client's default Funnel has a landing
+    // URL. A pixel-bearing live POST only happens with a real source URL.
+    if (!eventSourceUrl) {
+      const reason = `simulate: no funnel source URL for this client — these Meta pixels only accept a web ("website") source + event_source_url (Meta 400 subcode 2804039, G8/D-07 record), and a URL is never fabricated; the live send activates once the client's default Funnel has a landing URL (pixel ${metaPixelId} validated, NOT POSTed)`;
+      await prisma.outboundEvent.update({
+        where: { id: row.id },
+        data: { status: "sent", simulated: true, sentAt: now, error: reason, pixelUsed: null },
+      });
+      out.sent++;
+      out.simulated++;
+      out.errors.push(`${row.dedupKey}: ${reason}`);
+      continue;
+    }
+
+    // LIVE send to Meta's Conversions API (real pixel, real token, real
+    // source URL) — via the shared postOneCapiEvent primitive (also used by
+    // scripts/g8-replay.ts).
     const res = await postOneCapiEvent({
       pixel: metaPixelId,
       token: metaAccessToken,
@@ -260,6 +313,21 @@ export async function postOneCapiEvent(args: {
     apiVersion = process.env.META_API_VERSION ?? "v23.0",
     fetch: doFetch = fetch,
   } = args;
+  // D-11 send-boundary guard (defense-in-depth — `sendQueue` already
+  // simulates invalid pixels, but this primitive is also called directly by
+  // scripts/g8-replay.ts): a placeholder / non-numeric pixel id must NEVER
+  // form a Meta URL. Reject with a clear, non-network error (ok:false,
+  // httpStatus:null) — the caller persists it as a BLOCKED note.
+  if (!isValidMetaPixelId(pixel)) {
+    return {
+      ok: false,
+      httpStatus: null,
+      error: `REJECTED at send boundary: pixel '${String(pixel).slice(0, 40)}' is not a valid numeric Meta pixel/dataset id (expected 6-20 digits) — no request sent to Meta`,
+      fbtraceId: null,
+      metaEventId: null,
+      emqRaw: null,
+    };
+  }
   try {
     const res = await doFetch(
       `https://graph.facebook.com/${apiVersion}/${pixel}/events?access_token=${token}`,

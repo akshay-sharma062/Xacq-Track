@@ -69,7 +69,8 @@ describe("G8 CAPI LIVE — mocked Meta HTTP (no real network in tests)", () => {
     const calls: MetaCall[] = [];
     const out = await sendQueue(prisma, CLIENT, {
       metaAccessToken: "tok",
-      metaPixelId: "px_live",
+      metaPixelId: "1000000000000001",
+      eventSourceUrl: "https://upcurvv.com/w1", // D-11: a live POST requires a web source URL
       fetch: mockMeta(calls, () => ({ ok: true, status: 200, body: { fbtrace_id: "fbt_1", event_hub_log_view: [{ event_id: "eid_1", event_match_quality: 9 }] } })) as unknown as typeof fetch,
     });
 
@@ -84,7 +85,7 @@ describe("G8 CAPI LIVE — mocked Meta HTTP (no real network in tests)", () => {
     expect(got.metaEmq).toBe("9"); // verbatim
     expect(got.emqFromMeta).toBe(true);
     expect(got.matchQuality).toBe(9); // Meta's number, NOT the local 7
-    expect(got.pixelUsed).toBe("px_live");
+    expect(got.pixelUsed).toBe("1000000000000001");
     await close();
   });
 
@@ -93,7 +94,8 @@ describe("G8 CAPI LIVE — mocked Meta HTTP (no real network in tests)", () => {
     const calls: MetaCall[] = [];
     await sendQueue(prisma, CLIENT, {
       metaAccessToken: "tok",
-      metaPixelId: "px_wire",
+      metaPixelId: "1000000000000002",
+      eventSourceUrl: "https://upcurvv.com/w1", // D-11: the live path requires a web source URL
       fetch: mockMeta(calls, () => ({ ok: true, status: 200, body: { fbtrace_id: "fbt_w" } })) as unknown as typeof fetch,
     });
     const req = JSON.parse(String(calls[0].init.body)) as { data: Record<string, unknown>[] };
@@ -101,13 +103,18 @@ describe("G8 CAPI LIVE — mocked Meta HTTP (no real network in tests)", () => {
     expect(ev.action_type).toBe("Purchase");
     expect(ev.event_name).toBe("PURCHASE"); // Meta's required event_name (standard name)
     expect(ev.event_id).toBe(capiWireEventId(row.dedupKey)); // frozen from the stored dedupKey
-    // Meta's REAL user_data keys — unknown keys (client_ip / user_agent) are
-    // silently dropped by Meta, so the exact names are what raise EMQ.
-    expect(ev.user_data).toMatchObject({ client_ip_address: "10.0.0.9", client_user_agent: "g8-live-test/1.0", fbc: "fb.g8", fbp: "g8-fbp" });
-    expect((ev.user_data as Record<string, unknown>).ph).toBe(hashPhoneForCapi("+919812340099"));
-    expect((ev.user_data as Record<string, unknown>).em).toBe(hashEmailForCapi("g8lead@x.com"));
+    // D-11: with a source URL the event is a WEB source — "website" +
+    // event_source_url, and the web user_data signals (ip/ua) are kept.
+    expect(ev.action_source).toBe("website");
+    expect(ev.event_source_url).toBe("https://upcurvv.com/w1");
+    const ud = ev.user_data as Record<string, unknown>;
+    expect(ud.client_ip_address).toBe("10.0.0.9");
+    expect(ud.client_user_agent).toBe("g8-live-test/1.0");
+    expect(ud).toMatchObject({ fbc: "fb.g8", fbp: "g8-fbp" });
+    expect(ud.ph).toBe(hashPhoneForCapi("+919812340099"));
+    expect(ud.em).toBe(hashEmailForCapi("g8lead@x.com"));
     expect(ev.custom_data).toEqual({ value: 4999, currency_code: "INR" }); // Meta's custom_data field name
-    expect(String(calls[0].url)).toContain("/px_wire/events");
+    expect(String(calls[0].url)).toContain("/1000000000000002/events");
     await close();
   });
 
@@ -115,8 +122,9 @@ describe("G8 CAPI LIVE — mocked Meta HTTP (no real network in tests)", () => {
     const { prisma, row, close } = await seedPurchaseRow();
     const out = await sendQueue(prisma, CLIENT, {
       metaAccessToken: "tok",
-      metaPixelId: "px_403",
-      fetch: mockMeta([], () => ({ ok: false, status: 403, body: { error: { message: "Unsupported post request. Object with ID 'px_403' does not exist." } } })) as unknown as typeof fetch,
+      metaPixelId: "1000000000000003",
+      eventSourceUrl: "https://upcurvv.com/w1", // reach the live/POST path (BLOCKED on Meta's 4xx)
+      fetch: mockMeta([], () => ({ ok: false, status: 403, body: { error: { message: "Unsupported post request. Object with ID '1000000000000003' does not exist." } } })) as unknown as typeof fetch,
     });
     expect(out.failed).toBe(1);
     expect(out.live).toBe(0);
@@ -136,14 +144,15 @@ describe("G8 CAPI LIVE — mocked Meta HTTP (no real network in tests)", () => {
     // First run: send it live.
     await sendQueue(prisma, CLIENT, {
       metaAccessToken: "tok",
-      metaPixelId: "px_dedup",
+      metaPixelId: "1000000000000004",
+      eventSourceUrl: "https://upcurvv.com/w1", // D-11: live path requires the web source URL
       fetch: mockMeta([], () => ({ ok: true, status: 200, body: { fbtrace_id: "fbt_d" } })) as unknown as typeof fetch,
     });
     // Second run with a fresh counting spy: zero fetch calls, row unchanged.
     const calls: MetaCall[] = [];
     const out2 = await sendQueue(prisma, CLIENT, {
       metaAccessToken: "tok",
-      metaPixelId: "px_dedup",
+      metaPixelId: "1000000000000004",
       fetch: mockMeta(calls, () => ({ ok: true, status: 200, body: { fbtrace_id: "fbt_d2" } })) as unknown as typeof fetch,
     });
     expect(out2.total).toBe(0); // the sent row is no longer in queued/failed
@@ -166,7 +175,7 @@ describe("G8 CAPI LIVE — mocked Meta HTTP (no real network in tests)", () => {
     const calls: MetaCall[] = [];
     const out = await sendQueue(prisma, CLIENT, {
       metaAccessToken: "tok",
-      metaPixelId: "px_ref",
+      metaPixelId: "1000000000000005",
       fetch: mockMeta(calls, () => ({ ok: true, status: 200, body: {} })) as unknown as typeof fetch,
     });
     expect(out.skipped).toBe(1);
@@ -211,7 +220,7 @@ describe("G8 CAPI LIVE — mocked Meta HTTP (no real network in tests)", () => {
     const calls: MetaCall[] = [];
     const out = await sendQueue(prisma, CLIENT, {
       metaAccessToken: "", // no token -> simulate
-      metaPixelId: "px_no_tok",
+      metaPixelId: "1000000000000006",
       fetch: mockMeta(calls, () => ({ ok: true, status: 200, body: {} })) as unknown as typeof fetch,
     });
     expect(out.simulated).toBe(1);
@@ -233,7 +242,7 @@ describe("G8 CAPI LIVE — toMetaWireEvent + normalizeMetaEmq pure helpers", () 
       value: 100,
       currency: "INR",
       eventTimeIso: "2026-11-03T00:00:00Z",
-      pixelId: "px_1",
+      pixelId: "1000000000000008",
       clientIp: "1.2.3.4",
       userAgent: "ua",
     });
@@ -245,9 +254,33 @@ describe("G8 CAPI LIVE — toMetaWireEvent + normalizeMetaEmq pure helpers", () 
     expect(wire.action_source).toBe("system");
     expect("event_source" in wire).toBe(false); // internal label no longer leaks to the wire
     expect("event_source_url" in wire).toBe(false); // no source URL → no source-url field
-    expect((wire.user_data as Record<string, unknown>).client_ip_address).toBe("1.2.3.4");
-    expect((wire.user_data as Record<string, unknown>).client_user_agent).toBe("ua");
+    // D-11: on a non-web ("system") source the WEB-only user_data signals are
+    // OMITTED (Meta 400s them — subcode 2804039 "...such as 'website'"); the
+    // identity match signals (ph/em/fbc/fbp) remain.
+    expect((wire.user_data as Record<string, unknown>).client_ip_address).toBeUndefined();
+    expect((wire.user_data as Record<string, unknown>).client_user_agent).toBeUndefined();
+    expect((wire.user_data as Record<string, unknown>).ph).toBeDefined();
+    expect((wire.user_data as Record<string, unknown>).em).toBeDefined();
     expect(wire.event_id).toBe(capiWireEventId("Purchase:" + CLIENT)); // frozen
+  });
+
+  it("D-11: a web-source wire event KEEPS the web signals (ip/ua) alongside event_source_url", () => {
+    const ev = buildCapiEvent({
+      kind: "Purchase",
+      identity: { clientId: CLIENT, leadId: "l", phone: "+919812340001", email: "a@b.com" },
+      value: 100,
+      currency: "INR",
+      eventTimeIso: "2026-11-03T00:00:00Z",
+      pixelId: "1000000000000008",
+      clientIp: "1.2.3.4",
+      userAgent: "Mozilla/5.0",
+      eventSourceUrl: "https://upcurvv.com/w1",
+    });
+    const wire = toMetaWireEvent(ev);
+    expect(wire.action_source).toBe("website");
+    const ud = wire.user_data as Record<string, unknown>;
+    expect(ud.client_ip_address).toBe("1.2.3.4"); // web signals kept on the web source
+    expect(ud.client_user_agent).toBe("Mozilla/5.0");
   });
 
   it("web-source wire: a source URL flips action_source to 'website' and adds event_source_url", () => {
@@ -257,7 +290,7 @@ describe("G8 CAPI LIVE — toMetaWireEvent + normalizeMetaEmq pure helpers", () 
       value: 100,
       currency: "INR",
       eventTimeIso: "2026-11-03T00:00:00Z",
-      pixelId: "px_1",
+      pixelId: "1000000000000008",
       clientIp: "1.2.3.4",
       userAgent: "Mozilla/5.0",
       eventSourceUrl: "https://upcurvv.com/w1",
@@ -283,7 +316,7 @@ describe("G8 CAPI LIVE — toMetaWireEvent + normalizeMetaEmq pure helpers", () 
   it("postOneCapiEvent returns a structured result (never throws)", async () => {
     const calls: MetaCall[] = [];
     const res = await postOneCapiEvent({
-      pixel: "px_poe",
+      pixel: "1000000000000007",
       token: "tok",
       wireEvent: toMetaWireEvent(buildCapiEvent({ kind: "Lead", identity: { clientId: CLIENT, leadId: null, phone: "+911" }, eventTimeIso: "2026-11-03T00:00:00Z" })),
       fetch: mockMeta(calls, () => ({ ok: true, status: 200, body: { fbtrace_id: "fbt_poe", event_hub_log_view: [{ event_id: "eid_poe", event_match_quality: 8 }] } })) as unknown as typeof fetch,
@@ -293,5 +326,155 @@ describe("G8 CAPI LIVE — toMetaWireEvent + normalizeMetaEmq pure helpers", () 
     expect(res.metaEventId).toBe("eid_poe");
     expect(res.emqRaw).toBe(8);
     expect(calls).toHaveLength(1);
+  });
+});
+
+describe("D-11 — the literal 'pixel' placeholder can never reach Meta", () => {
+  it("isValidMetaPixelId: only numeric Meta ids pass (placeholder 'pixel' / short / empty / non-string fail)", async () => {
+    const { isValidMetaPixelId } = await import("../src/lib/meta/capi");
+    expect(isValidMetaPixelId("4438125733120237")).toBe(true); // the .env shape
+    expect(isValidMetaPixelId("  4438125733120237  ")).toBe(true); // whitespace-tolerant
+    expect(isValidMetaPixelId("pixel")).toBe(false); // the G4 placeholder
+    expect(isValidMetaPixelId("12345")).toBe(false); // too short (5 digits)
+    expect(isValidMetaPixelId("")).toBe(false);
+    expect(isValidMetaPixelId(null)).toBe(false);
+    expect(isValidMetaPixelId(undefined)).toBe(false);
+    expect(isValidMetaPixelId(4438125733120237)).toBe(false); // must be a string
+  });
+
+  it("placeholder pixel 'pixel' (token present) -> SIMULATE, no network, exact note; Meta is never called", async () => {
+    const { prisma, row, close } = await seedPurchaseRow();
+    const calls: MetaCall[] = [];
+    const out = await sendQueue(prisma, CLIENT, {
+      metaAccessToken: "tok",
+      metaPixelId: "pixel", // the exact D-11 offender
+      fetch: mockMeta(calls, () => ({ ok: true, status: 200, body: {} })) as unknown as typeof fetch,
+    });
+    expect(calls).toHaveLength(0); // NEVER a Meta POST with a placeholder
+    expect(out.simulated).toBe(1);
+    expect(out.live).toBe(0);
+    expect(out.failed).toBe(0);
+    const got = await prisma.outboundEvent.findUniqueOrThrow({ where: { id: row.id } });
+    expect(got.status).toBe("sent");
+    expect(got.simulated).toBe(true);
+    expect(got.sentToMeta).toBe(false); // not presented as a live send
+    expect(got.pixelUsed).toBeNull(); // a placeholder is never recorded as "the pixel used"
+    expect(got.error).toMatch(/not a valid numeric Meta pixel/i);
+    expect(got.error).toContain("'pixel'");
+    await close();
+  });
+
+  it("postOneCapiEvent rejects a placeholder pixel at the boundary (no request built, no fetch)", async () => {
+    const calls: MetaCall[] = [];
+    const res = await postOneCapiEvent({
+      pixel: "pixel",
+      token: "tok",
+      wireEvent: { event_name: "PURCHASE", event_time: 1 },
+      fetch: mockMeta(calls, () => ({ ok: true, status: 200, body: {} })) as unknown as typeof fetch,
+    });
+    expect(res.ok).toBe(false);
+    expect(res.httpStatus).toBeNull(); // not an HTTP error — rejected pre-network
+    expect(calls).toHaveLength(0);
+    expect(res.error).toMatch(/REJECTED at send boundary/);
+    expect(res.error).toContain("not a valid numeric Meta pixel");
+    // A valid numeric id still forms the correct Meta URL (the .env value flows through verbatim).
+    const res2 = await postOneCapiEvent({
+      pixel: "4438125733120237",
+      token: "tok",
+      wireEvent: { event_name: "PURCHASE", event_time: 1 },
+      fetch: mockMeta(calls, () => ({ ok: true, status: 200, body: { fbtrace_id: "f" } })) as unknown as typeof fetch,
+    });
+    expect(res2.ok).toBe(true);
+    expect(String(calls[calls.length - 1].url)).toContain("/4438125733120237/events");
+  });
+
+  it("the .env value (numeric) is what reaches Meta — pixelForClient + URL, never a literal", async () => {
+    const { pixelForClient } = await import("../src/lib/meta/pixel-map");
+    const prev = process.env.META_PIXEL_ID_CL_UPCURVV;
+    process.env.META_PIXEL_ID_CL_UPCURVV = "4438125733120237"; // the confirmed .env shape
+    try {
+      const pixel = pixelForClient(CLIENT);
+      expect(pixel).toBe("4438125733120237"); // the .env numeric value verbatim
+      expect(pixel !== "pixel").toBe(true);
+      const calls: MetaCall[] = [];
+      const res = await postOneCapiEvent({
+        pixel: pixel as string,
+        token: "tok",
+        wireEvent: { event_name: "PURCHASE", event_time: 1 },
+        fetch: mockMeta(calls, () => ({ ok: true, status: 200, body: { fbtrace_id: "f" } })) as unknown as typeof fetch,
+      });
+      expect(res.ok).toBe(true);
+      expect(String(calls[0].url)).toContain("/4438125733120237/events");
+      expect(String(calls[0].url)).not.toContain("/pixel/events");
+    } finally {
+      if (prev === undefined) delete process.env.META_PIXEL_ID_CL_UPCURVV;
+      else process.env.META_PIXEL_ID_CL_UPCURVV = prev;
+    }
+  });
+
+  it("D-11: valid pixel + token but NO source URL -> stays SIMULATED with a note (never POSTs a Meta-invalid 'system' web event)", async () => {
+    const { prisma, row, close } = await seedPurchaseRow();
+    const calls: MetaCall[] = [];
+    const out = await sendQueue(prisma, CLIENT, {
+      metaAccessToken: "tok",
+      metaPixelId: "1000000000000009", // valid numeric pixel
+      fetch: mockMeta(calls, () => ({ ok: false, status: 400, body: { error: { message: "Invalid parameter", error_subcode: 2804039 } } })) as unknown as typeof fetch,
+    });
+    // The bootstrap client has no default Funnel landing URL -> no web source
+    // Meta accepts on these pixels (2804039) -> the queue stays simulated,
+    // no network call is made, and the note says exactly what unblocks it.
+    expect(calls).toHaveLength(0);
+    expect(out.simulated).toBe(1);
+    expect(out.failed).toBe(0);
+    expect(out.live).toBe(0);
+    const got = await prisma.outboundEvent.findUniqueOrThrow({ where: { id: row.id } });
+    expect(got.status).toBe("sent");
+    expect(got.simulated).toBe(true);
+    expect(got.sentToMeta).toBe(false);
+    expect(got.error).toMatch(/no funnel source URL/i);
+    expect(got.error).toMatch(/2804039/);
+    expect(got.pixelUsed).toBeNull(); // validated pixel, not recorded as "used"
+    await close();
+  });
+
+  it("D-11: valid pixel + token + a source URL -> LIVE POST with the URL (the unblocked path)", async () => {
+    const { prisma, row, close } = await seedPurchaseRow();
+    const calls: MetaCall[] = [];
+    const out = await sendQueue(prisma, CLIENT, {
+      metaAccessToken: "tok",
+      metaPixelId: "1000000000000010",
+      eventSourceUrl: "https://upcurvv.com/w1", // injectable opt (the Funnel row is the prod source)
+      fetch: mockMeta(calls, () => ({ ok: true, status: 200, body: { fbtrace_id: "fbt_web", event_hub_log_view: [{ event_id: "eid_web", event_match_quality: 9 }] } })) as unknown as typeof fetch,
+    });
+    expect(out.live).toBe(1);
+    expect(out.simulated).toBe(0);
+    const got = await prisma.outboundEvent.findUniqueOrThrow({ where: { id: row.id } });
+    expect(got.status).toBe("sent");
+    expect(got.simulated).toBe(false);
+    expect(got.sentToMeta).toBe(true);
+    expect(got.pixelUsed).toBe("1000000000000010");
+    expect(got.metaEmq).toBe("9");
+    const sentEv = JSON.parse(String(calls[0].init.body)).data[0] as Record<string, unknown>;
+    expect(sentEv.action_source).toBe("website");
+    expect(sentEv.event_source_url).toBe("https://upcurvv.com/w1");
+    await close();
+  });
+
+  it("a settings-fallback (Client.metaPixelId) placeholder is rejected too — simulates, not a Meta 400", async () => {
+    const { prisma, row, close } = await seedPurchaseRow();
+    const calls: MetaCall[] = [];
+    const out = await sendQueue(prisma, CLIENT, {
+      metaAccessToken: "tok",
+      metaPixelId: "pixel", // e.g. someone typed "pixel" into the settings form
+      fetch: mockMeta(calls, () => ({ ok: false, status: 400, body: { error: { message: "Unsupported post request. Object with ID 'pixel' does not exist." } } })) as unknown as typeof fetch,
+    });
+    expect(calls).toHaveLength(0); // the guard short-circuits BEFORE any POST
+    expect(out.simulated).toBe(1);
+    expect(out.failed).toBe(0); // never a 400 on 'pixel' again
+    const got = await prisma.outboundEvent.findUniqueOrThrow({ where: { id: row.id } });
+    expect(got.simulated).toBe(true);
+    expect(got.status).toBe("sent"); // closed out as a local mark, not stuck-failed
+    expect(got.sentToMeta).toBe(false);
+    await close();
   });
 });
