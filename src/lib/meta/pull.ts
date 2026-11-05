@@ -50,6 +50,15 @@ export interface PullResult {
   /** how many of those days needed a live FX fetch (first-time days). */
   fxLiveFills: number;
   simulated?: boolean;
+  /**
+   * D-08 (Meta data expansion): the ad-account balance (billing amount due,
+   * in the account currency) when the probe-proven `fields=balance` fetch
+   * succeeded. null = not fetched (simulate) or the fetch failed — the stored
+   * column stays as-is, the card shows "—" (never a fake 0).
+   */
+  balance?: number | null;
+  /** exact Meta error string when the balance fetch 4xx'd (recorded, not blocking). */
+  balanceNote?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -72,9 +81,20 @@ export async function upsertPulled(
   fxLiveFills = 0,
   simulated = false,
   status: string = "ACTIVE",
+  /** D-08: the live balance (bill amount due, account currency) from the
+   *  probe-proven `fields=balance` fetch. Written to the row ONLY when a real
+   *  number came back; null/undefined (fetch failed or simulate) NEVER clears
+   *  a previously stored value — the card keeps showing the last known
+   *  balance, never zeroes it on a transient Meta error. */
+  balance?: number | null,
+  /** D-08: the exact Meta error string when the balance fetch 4xx'd (recorded, not thrown). */
+  balanceNote?: string | null,
 ): Promise<PullResult> {
   // 1) Ad account. D-01: the link row carries displayOwnerName + Meta
   // account_status so the ad-account filter control shows the live state.
+  // D-08: balance only written when balance is a real number (see param docs).
+  const balanceWrite =
+    balance != null ? { balance, balanceAsOf: new Date() } : {};
   let account = await prisma.adAccount.findUnique({ where: { metaId: metaAccountId } });
   if (!account) {
     account = await prisma.adAccount.create({
@@ -82,12 +102,16 @@ export async function upsertPulled(
         metaId: metaAccountId, clientId, name: metaAccountName, currency,
         displayOwnerName: metaAccountName, status,
         lastPulledAt: new Date(),
+        ...balanceWrite,
       },
     });
   } else {
     account = await prisma.adAccount.update({
       where: { metaId: metaAccountId },
-      data: { clientId, name: metaAccountName, currency, status, lastPulledAt: new Date() },
+      data: {
+        clientId, name: metaAccountName, currency, status, lastPulledAt: new Date(),
+        ...balanceWrite,
+      },
     });
   }
   const accountId = account.id;
@@ -188,6 +212,8 @@ export async function upsertPulled(
     fxRates: [...fxRates.entries()].map(([day, rate]) => ({ day, rate })),
     fxLiveFills,
     simulated,
+    balance: balance ?? null,
+    balanceNote: balanceNote ?? null,
   };
 }
 
@@ -236,6 +262,42 @@ export class MetaAccessError extends Error {
     this.name = "MetaAccessError";
     this.status = status;
     this.permission = permission;
+  }
+}
+
+/**
+ * D-08 (Meta data expansion): parse Meta's `balance` field (the ad-account
+ * "bill amount due", returned as a string in the account currency — same
+ * major-unit convention as insights `spend`). Empty / non-numeric → null,
+ * never a guess.
+ */
+export function parseMetaBalance(raw: unknown): number | null {
+  if (raw == null || raw === "") return null;
+  const n = Number(typeof raw === "string" ? raw : raw);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * D-08: fetch the ad-account balance (probe (a) proved `fields=balance` 200s on
+ * v23.0; G1 never pulled it). Isolated by design: a 4xx on balance must NOT
+ * fail the whole spend pull (the G4 per-account isolation rule) — it returns
+ * `{ balance: null, note: <exact Meta error> }` and the caller keeps the last
+ * stored value (the card shows the last known balance, never a fake 0).
+ */
+export async function fetchAccountBalance(
+  ref: string,
+  token: string,
+  apiVersion: string,
+): Promise<{ balance: number | null; note: string | null }> {
+  try {
+    const j: any = await apiGet(ref, token, apiVersion, "fields=balance");
+    const bal = parseMetaBalance(j?.balance);
+    return bal != null
+      ? { balance: bal, note: null }
+      : { balance: null, note: "Meta returned no balance value (field absent/empty) — last stored value kept" };
+  } catch (e: any) {
+    // apiGet throws "Meta <status> on /<ref>: <body>" — the exact string, recorded.
+    return { balance: null, note: String(e?.message ?? e) };
   }
 }
 
@@ -422,6 +484,11 @@ export async function pullAdAccount(
   const currency = (acct?.currency ?? "USD").toUpperCase();
   const accountName = acct?.name ?? ref;
 
+  // 0b) D-08: the ad-account balance (bill amount due), probe (a)-proven 200 on
+  //     v23.0; G1 never pulled it. Isolated — a balance 400 records the exact
+  //     error (balanceNote) but never fails the spend pull (the G4 rule).
+  const bal = await fetchAccountBalance(ref, token, apiVersion);
+
   const ads: PulledAd[] = [];
 
   // 1) Ad objects with their ad set + campaign + creative (ad objects ARE the
@@ -498,7 +565,23 @@ export async function pullAdAccount(
   const dayList = [...new Set(ads.map((a) => a.day))];
   const { byDay: fxRates, liveFills } = await resolveDayRates(prisma, currency, dayList);
 
-  return upsertPulled(prisma, clientId, ref, accountName, currency, ads, fxRates, liveFills, false, normalizeAccountStatus(acct?.account_status));
+  const result = await upsertPulled(
+    prisma, clientId, ref, accountName, currency, ads, fxRates, liveFills, false,
+    normalizeAccountStatus(acct?.account_status),
+    // D-08: only write the balance column when the fetch succeeded (non-null).
+    // A failed fetch (bal.balance===null) keeps the last stored value — never
+    // zeroes the card on a transient Meta error.
+    bal.balance,
+    bal.note,
+  );
+
+  // simulate: a deterministic fixture — no live balance, note it as such so the
+  // caller knows "—" means "not pulled", not "account owes nothing".
+  if (isSimulateMode()) {
+    result.balance = null;
+    result.balanceNote = "simulate mode — no live balance fetch";
+  }
+  return result;
 }
 
 /**

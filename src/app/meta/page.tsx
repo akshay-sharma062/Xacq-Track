@@ -82,6 +82,20 @@ export default async function MetaPage({
                   </span>
                   <span className="mono good">{inr(spend30)}</span>
                 </div>
+                {/* D-08: the ad-account balance (bill amount due, billing
+                    currency) from the probe-proven `fields=balance` pull.
+                    null = not yet pulled → "—" (never a fake 0). Meta "Leads"
+                    is intentionally NOT shown here: it is not an insights
+                    metric on these accounts (probe: 400) — its source is G2
+                    Instant Forms (deferred) or G3 clicks (DECISIONS D-08). */}
+                <div className="row spread" style={{ marginTop: 6 }}>
+                  <span className="muted" style={{ fontSize: 12 }} title="Meta ad-account balance (bill amount due).">
+                    balance (due)
+                  </span>
+                  <span className="mono" style={{ fontSize: 13 }}>
+                    {a.balance != null ? `${a.currency} ${Number(a.balance).toLocaleString("en-IN")}` : "— (not pulled)"}
+                  </span>
+                </div>
                 <div className="faint" style={{ fontSize: 11 }}>
                   last pulled {a.lastPulledAt ? new Date(a.lastPulledAt).toLocaleString() : "never"}
                 </div>

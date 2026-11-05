@@ -19,6 +19,45 @@ export interface AccountSummary {
   ads: number;
   leads: number; // client-level leads (0 until G3/G4 traffic — honest empty)
   lastPulledAt: string | null; // ISO; the "data as of" stamp + per-card timestamp
+  // D-08 (Meta data expansion): the ad-account balance (bill amount due, in the
+  // account's billing currency) from the probe-proven `fields=balance` pull.
+  // null = not yet pulled / pull failed → the card shows "—" (never a fake 0).
+  balance: number | null;
+  balanceAsOf: string | null; // ISO; when the balance was last read from Meta
+}
+
+/**
+ * D-08 dashboard date-range control. The probe (`.meta-probe-findings.txt`)
+ * showed Meta's account insights returns only a 30-day rollup on this API
+ * (per-day `period`/presets 400 or are ignored), so the spend-family KPIs +
+ * chart + per-account cards are computed over STORED Spend rows:
+ *   - a range within the stored window (Yesterday/7d/30d/custom ≤30d) slices
+ *     the stored rows by day;
+ *   - a range beyond it (Last Month/Last Year) cannot be fetched from Meta, so
+ *     we show the closest available stored data + an honest label — never an
+ *     extrapolated number (`spendDataBasis` carries the label text).
+ */
+export type SpendRange = "yesterday" | "7d" | "30d" | "last_month" | "last_year" | "custom";
+
+export interface SpendRangeParams {
+  range: SpendRange;
+  /** the chip / label text (e.g. "Last 7 days"). */
+  label: string;
+  /**
+   * true ONLY for `30d` — the single range the stored Spend rows actually
+   * carry (one 30-day Meta rollup, day=date_stop — the probe proved no
+   * per-day data exists on this API). Every other range has no per-day data
+   * behind it, so the UI shows the closest-available (the 30d rollup) plus
+   * `dataBasis`, and it is never read as real per-day data for that range.
+   */
+  native: boolean;
+  /** honest label shown when !native; null when native. */
+  dataBasis: string | null;
+  /** [leadSince, leadUntil] — window to slice OUR OWN lead/event/payment rows
+   *  (they carry real timestamps, so this is a faithful filter even when the
+   *  Meta spend family can only show the 30d rollup). null untilDate = open. */
+  leadSince: Date;
+  leadUntil: Date | null;
 }
 
 export interface DashboardData {
@@ -67,7 +106,7 @@ export async function dashboardFor(
     prisma.adAccount.findMany({
       where: { clientId, ...(adAccountId ? { id: adAccountId } : {}) },
       orderBy: { name: "asc" },
-      select: { metaId: true, name: true, currency: true, status: true, id: true, lastPulledAt: true },
+      select: { metaId: true, name: true, currency: true, status: true, id: true, lastPulledAt: true, balance: true, balanceAsOf: true },
     }),
   ]);
 
@@ -93,6 +132,9 @@ export async function dashboardFor(
       ads,
       leads: leadCount,
       lastPulledAt: a.lastPulledAt ? a.lastPulledAt.toISOString() : null,
+      // D-08: null = not yet pulled / not fetched this pull → the card shows "—".
+      balance: a.balance ?? null,
+      balanceAsOf: a.balanceAsOf ? a.balanceAsOf.toISOString() : null,
     });
   }
 
@@ -127,6 +169,50 @@ export async function dashboardFor(
 
 function dayStr(ms: number): string {
   return new Date(ms).toISOString().slice(0, 10);
+}
+
+// D-08: the probe (`.meta-probe-findings.txt`) proved Meta's account insights on
+// this API version only returns a 30-day rollup (per-day presets / period /
+// date_start-stop all 200 but IGNORED — one row, day=date_stop), so the stored
+// Spend rows carry that single 30-day rollup. Only the `30d` range is therefore
+// `native` (it *is* the data we hold). Every other range has no per-day data
+// behind it, so the UI shows the closest-available 30d rollup + `dataBasis`
+// and is never read as real per-day data for that range. We ALSO expose a
+// `leadSince`/`leadUntil` window: our OWN lead/event/payment rows carry real
+// timestamps, so they can be faithfully sliced to any range even when the Meta
+// spend family can only show the 30d rollup.
+export function resolveSpendRange(
+  range: SpendRange,
+  custom?: { dayStart?: string; dayEnd?: string | null }
+): SpendRangeParams {
+  const now = Date.now();
+  const DAY = 86_400_000;
+  const ROLLUP_ONLY = "30-day rollup only (Meta API limit — see DECISIONS D-08)";
+  const openUntil = null;
+  switch (range) {
+    case "yesterday": {
+      // [UTC midnight yesterday, UTC midnight today) — a day-aligned slice.
+      const d = new Date(now);
+      const today0 = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+      return { range, label: "Yesterday", native: false, dataBasis: ROLLUP_ONLY, leadSince: new Date(today0 - DAY), leadUntil: new Date(today0) };
+    }
+    case "7d":
+      return { range, label: "Last 7 days", native: false, dataBasis: ROLLUP_ONLY, leadSince: new Date(now - 7 * DAY), leadUntil: openUntil };
+    case "30d":
+      return { range, label: "Last 30 days", native: true, dataBasis: null, leadSince: new Date(now - 30 * DAY), leadUntil: openUntil };
+    case "last_month":
+      return { range, label: "Last month", native: false, dataBasis: ROLLUP_ONLY, leadSince: new Date(now - 30 * DAY), leadUntil: openUntil };
+    case "last_year":
+      return { range, label: "Last year", native: false, dataBasis: ROLLUP_ONLY, leadSince: new Date(now - 365 * DAY), leadUntil: openUntil };
+    case "custom": {
+      // Custom is never "native": the stored data is one 30-day rollup, so a
+      // custom span shows the closest-available rollup + the label. The lead
+      // side is still sliced to the custom bounds (real timestamps).
+      const start = custom?.dayStart ? new Date(`${custom.dayStart}T00:00:00Z`) : new Date(now - 30 * DAY);
+      const end = custom?.dayEnd ? new Date(`${custom.dayEnd}T23:59:59.999Z`) : null;
+      return { range, label: "Custom range", native: false, dataBasis: ROLLUP_ONLY, leadSince: start, leadUntil: end };
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -202,6 +288,12 @@ export interface AllDashboard {
     dataAsOf: string | null; // max ad-account lastPulledAt (ISO) — the "data as of" stamp
     fx: { currency: string; rate: number; fetchedAt: string | null; source: string | null; backfillPending: boolean }[];
   };
+  /** D-08: the active date-range control + its data-basis label. null = the
+   *  default 30d native view (no control set). `native` false = the requested
+   *  range exceeds the stored 30-day rollup (Meta API limit) — the UI shows
+   *  `dataBasis` so the closest-available data is never read as real per-day
+   *  data for that range. */
+  spendRange: { range: SpendRange; label: string; native: boolean; dataBasis: string | null } | null;
 }
 
 export async function dashboardAll(
@@ -209,7 +301,12 @@ export async function dashboardAll(
   clientIds: string[],
   model: AttributionModel = "last_paid_click",
   windowDays = 30,
-  adAccountMetaId?: string
+  adAccountMetaId?: string,
+  /** D-08: the dashboard date-range control. Omitted = the default 30d native
+   *  window (backward-compatible; existing callers unchanged). */
+  range?: SpendRange,
+  /** D-08: custom-range bounds when range === "custom". */
+  customRange?: { dayStart?: string; dayEnd?: string | null }
 ): Promise<AllDashboard> {
   if (clientIds.length === 0) clientIds = [""]; // keep the `in` predicate valid
   const since = new Date(Date.now() - windowDays * DAY_MS);
@@ -220,6 +317,17 @@ export async function dashboardAll(
     ? (await prisma.adAccount.findFirst({ where: { metaId: adAccountMetaId, clientId: { in: clientIds } }, select: { id: true } }))?.id
     : undefined;
   const spendScope = adAccountId ? { adAccountId } : {};
+
+  // D-08: the date-range control. The SPEND family always shows the stored
+  // 30-day rollup (the only per-day data Meta returns for this API — probe
+  // proven, `.meta-probe-findings.txt`); the LEAD family (leads/events/
+  // payments, which carry real timestamps) is sliced to the requested range.
+  // When no range param is passed, leadSince/leadUntil fall back to the
+  // default 30d window — byte-identical to the pre-D-08 behaviour.
+  const rp = range ? resolveSpendRange(range, customRange) : null;
+  const leadSince = rp ? rp.leadSince : since;
+  const leadUntil = rp ? rp.leadUntil : null;
+
 
   // -- SPEND family: one raw read, per-currency native + INR + per-day +
   //    engagement totals (impressions/reach/clicks/thruPlays) for the KPI row.
@@ -259,13 +367,16 @@ export async function dashboardAll(
 
   // -- LEADS family: sum the additive counters across the visible set (0 = the
   //    honest pre-G3/G4 empty state; the UI labels it, we never invent numbers).
+  // D-08: sliced to the active date-range when one is set (leadSince/leadUntil);
+  // otherwise the default 30d window (unchanged behaviour).
+  const sinceUntil = leadUntil ? { gte: leadSince, lte: leadUntil } : { gte: leadSince };
   const [leadCount, registered, attended, calls, payments] = await Promise.all([
-    prisma.lead.count({ where: { clientId: { in: clientIds }, createdAt: { gte: since } } }),
-    prisma.event.count({ where: { clientId: { in: clientIds }, type: "registered", timestamp: { gte: since } } }),
+    prisma.lead.count({ where: { clientId: { in: clientIds }, createdAt: sinceUntil } }),
+    prisma.event.count({ where: { clientId: { in: clientIds }, type: "registered", timestamp: sinceUntil } }),
     prisma.lead.count({ where: { clientId: { in: clientIds }, stage: "Attended" } }),
-    prisma.event.count({ where: { clientId: { in: clientIds }, type: "call_booked", timestamp: { gte: since } } }),
+    prisma.event.count({ where: { clientId: { in: clientIds }, type: "call_booked", timestamp: sinceUntil } }),
     prisma.payment.findMany({
-      where: { clientId: { in: clientIds }, status: { in: ["paid", "refunded"] }, paidAt: { gte: since } },
+      where: { clientId: { in: clientIds }, status: { in: ["paid", "refunded"] }, paidAt: sinceUntil },
       select: { status: true, amount: true },
     }),
   ]);
@@ -313,7 +424,7 @@ export async function dashboardAll(
   const accounts = await prisma.adAccount.findMany({
     where: { clientId: { in: clientIds }, ...(adAccountMetaId ? { metaId: adAccountMetaId } : {}) },
     orderBy: { name: "asc" },
-    select: { metaId: true, name: true, currency: true, status: true, id: true, lastPulledAt: true, clientId: true, displayOwnerName: true },
+    select: { metaId: true, name: true, currency: true, status: true, id: true, lastPulledAt: true, clientId: true, displayOwnerName: true, balance: true, balanceAsOf: true },
   });
   const acctIds = accounts.map((a) => a.id);
   const acctScope: any = acctIds.length ? { in: acctIds } : { in: [""] };
@@ -344,6 +455,10 @@ export async function dashboardAll(
     ads: counts[i][2],
     leads: 0, // client-level, 0 pre G3/G4 (honest empty state)
     lastPulledAt: a.lastPulledAt ? a.lastPulledAt.toISOString() : null,
+    // D-08: the ad-account balance (bill amount due, billing currency). null =
+    // not yet pulled (e.g. the simulate fixture or a pre-balance pull) → "—".
+    balance: a.balance ?? null,
+    balanceAsOf: a.balanceAsOf ? a.balanceAsOf.toISOString() : null,
   }));
 
   // -- §1 PER-CLIENT breakdown table: one row per client in the view, with its
@@ -518,5 +633,10 @@ export async function dashboardAll(
     topAds,
     capi,
     sync: { dataAsOf: maxPull, fx },
+    // D-08: the active range + its data-basis label. null = the default 30d
+    // native view (no control set). The UI renders `dataBasis` next to the
+    // KPIs when native is false so a beyond-window range is never read as
+    // real per-day data.
+    spendRange: rp ? { range: rp.range, label: rp.label, native: rp.native, dataBasis: rp.dataBasis } : null,
   };
 }

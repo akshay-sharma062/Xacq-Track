@@ -2,10 +2,11 @@ import { Topbar } from "./components/Topbar";
 import { Stat, BarChart, Meter, Thumbnail, inr, pct, SectionTitle } from "./components/ui";
 import { getSession, resolveClient, qs } from "@/lib/api-utils";
 import { visibleClients } from "@/lib/session";
-import { dashboardAll } from "@/lib/dashboard";
+import { dashboardAll, SpendRange } from "@/lib/dashboard";
 import { prisma } from "@/lib/prisma";
 import Link from "next/link";
 import { AutoRefresh } from "./components/AutoRefresh";
+import { RangePicker } from "./components/RangePicker";
 
 /**
  * Screen 1 — Dashboard. Dashboard-V2 §1/§2: the DEFAULT view is the ALL-clients
@@ -48,17 +49,36 @@ export default async function Dashboard({
   }
 
   const adAccountMeta = sp.adAccount ?? undefined;
-  const d = await dashboardAll(prisma, clientIds, "last_paid_click", 30, adAccountMeta);
+  // D-08: the date-range control (`?range=` + `?rFrom`/`?rTo` when custom).
+  // Absent = the default 30d native view (byte-identical to pre-D-08 behaviour).
+  const rangeParam = (sp.range as SpendRange | undefined) ?? undefined;
+  const customRange =
+    rangeParam === "custom" && (sp.rFrom || sp.rTo)
+      ? { dayStart: sp.rFrom ?? undefined, dayEnd: sp.rTo ?? null }
+      : undefined;
+  const d = await dashboardAll(prisma, clientIds, "last_paid_click", 30, adAccountMeta, rangeParam, customRange);
   const k = d.kpi;
   const view = isAll ? "All clients" : clientIds.length ? "Client" : "";
   const acctLabel = adAccountMeta ? ` · ${adAccountMeta}` : "";
+  const rangeLabel = d.spendRange ? d.spendRange.label : "last 30 days";
 
   return (
     <>
-      <Topbar title="Dashboard" crumb={`${view} · last 30 days${acctLabel}`} />
+      <Topbar title="Dashboard" crumb={`${view} · ${rangeLabel}${acctLabel}`} />
 
       {/* §3b: "Data as of HH:MM IST · next update in N min" + 60s auto-poll. */}
       <AutoRefresh dataAsOf={d.sync.dataAsOf} />
+
+      {/* D-08: the date-range control. 30d is the default (the stored rollup);
+          beyond that, Meta returns no per-day data (probe), so the dashboard
+          shows closest-available + the honest label below the KPIs. */}
+      <RangePicker />
+      {d.spendRange && !d.spendRange.native && (
+        <div className="card" style={{ fontSize: 12, padding: "8px 12px" }} role="note">
+          <span className="badge warn">data basis</span>{" "}
+          <span className="muted">{d.spendRange.dataBasis} — the numbers below are the closest stored data, not a {d.spendRange.label.toLowerCase()} slice.</span>
+        </div>
+      )}
 
       {/* §2 A: aggregate KPI row (all-currency + INR-normalized; FX-missing shown). */}
       <div className="grid cols-4 mb">
@@ -101,6 +121,11 @@ export default async function Dashboard({
               </span>
               <span className="d mono">
                 {a.campaigns} camp · {a.ads} ads
+              </span>
+              {/* D-08: Meta ad-account balance (bill amount due, account currency) —
+                  probe (a) 200. null = not yet pulled → "—" (never a fake 0). */}
+              <span className="d faint" style={{ fontSize: 11 }} title="Meta ad-account balance (bill amount due), pulled from the Marketing API. '—' = not pulled yet.">
+                balance (due) {a.balance != null ? <b className="mono">{a.currency} {Number(a.balance).toLocaleString("en-IN")}</b> : "— (not pulled yet)"}
               </span>
               <span className="d faint" style={{ fontSize: 11 }}>
                 pulled {a.lastPulledAt ? a.lastPulledAt.slice(5, 16).replace("T", " ") + " IST" : "never"}

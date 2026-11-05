@@ -299,6 +299,13 @@ model AdAccount {
   status     String @default("ACTIVE") // ACTIVE | DISABLED | LOCKED (Meta account_status)
   currency   String @default("USD") // ad accounts often report in USD; we store INR too
 
+  // D-08 (Meta data expansion): the ad-account balance, in the account's
+  // BILLING currency (INR here), read live from the Marketing API
+  // (GET /act_<id>?fields=balance — probe (a), 200). Additive; only populated
+  // at pull time. null = not yet pulled (the card shows "—", never a fake 0).
+  balance     Float?
+  balanceAsOf DateTime?
+
   campaigns AdCampaign[]
   adsets    AdSet[]
   ads       Ad[]

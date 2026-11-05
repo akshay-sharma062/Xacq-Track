@@ -317,3 +317,63 @@ recorded stub, full PDF is G9/G11.
 **Scope rule:** CAPI = money + Meta-gated → **[REVIEW]** commit; PO reviews
 before the task is marked done. No pull row is touched; pixels/tokens stay in
 `.env` only.
+
+## D-08 — Meta data expansion + date-range filters: API capability matrix (2026-11-05)
+
+**Phase-1 honest probe** (`scripts/meta-probe.ts`, `pnpm meta:probe` — read-only,
+one account first: `cl_upcurvv` → `act_4749960348632164`, v23.0; raw findings in
+`.meta-probe-findings.txt`, gitignored; **a 400 is a finding, not a failure**):
+
+| area | probe | Meta HTTP | result |
+|---|---|---|---|
+| (a) account | `GET /act_…?fields=balance,name,currency` | **200** | `balance="218661"` (INR) — G1 never pulled it; **Balance is real** |
+| (b) insights | `time_preset` ∈ {yesterday, last_7d, last_30d, last_month, last_year} | 200 | **param IGNORED** — every preset returns the same default 30-day rollup (1 row, `[date_start..date_stop]` ≈ 30d) |
+| (b) insights | `date_start`/`date_stop` pairs (7d / 30d / 365d) | 200 | **ignored** — same 30d rollup row back, not the requested window |
+| (b) insights | `period=daily` (+ preset) | 200 | **ignored** — `period` is not a valid param on this endpoint/version; no per-day rows |
+| (b) insights | `time_range={"since","until"}` | **200 + honored** | the ONE range mechanism that works: `[10-30..11-05]` returned distinct spend (32904.3 vs the 30d 82116.98). G1's 400 was the *empty/malformed* `time_range` ("must be non-empty"); a well-formed one is valid |
+| (c) ad + account insights | `fields=lpv`, `fields=clpv`, `fields=lpv,clpv` | **400** `#100 not valid for fields` | **LPV/CLPV do not exist on this API version** → no card, the 400 is recorded (never papered over) |
+
+**Phase-2 build (only what the probe proved):**
+- **Per-day storage from presets: SKIPPED** — the conditional "if daily rows
+  come back for a preset" is **false** (rows=1, distinctDays=1 for every
+  preset/dated call). No per-day Spend rows added; the existing single 30-day
+  rollup row per ad stays (fixed point: ad=3808/adSet=1172/spend=3808,
+  `fxRate=1` INR intact; WAL journal `f5a641b` stands). `time_range` is
+  honored but still returns a *range rollup* (one row per ad), not per-day —
+  so it can't feed per-day rows either; recorded here, not built.
+- **Balance** (probe (a) passed): `AdAccount.balance` + `balanceAsOf` columns
+  (additive `db push`); `pullAdAccount` now fetches `fields=balance`
+  **isolated** — a balance 4xx records the exact Meta string (`balanceNote`)
+  and never fails the spend pull (the G4 per-account isolation rule); a
+  failed fetch never clears the last stored value (card shows "—", not a
+  fake 0). Surfaces on the dashboard account cards + the `/meta` card.
+- **Dashboard date-range control** (`?range=` + custom `?rFrom/?rTo`):
+  Yesterday / 7D / 30D / Last Month / Last Year / Custom. Semantics, per the
+  probe: the SPEND family always shows the **stored 30-day rollup** (the only
+  per-day data Meta returns — the closest available data), and any range that
+  isn't 30d carries the honest label **"30-day rollup only (Meta API limit —
+  see DECISIONS D-08)"** — never a sliced/extrapolated number. The LEAD
+  family (leads/events/payments, which have real timestamps) is sliced to the
+  range. 30d absent-param = byte-identical to pre-D-08 behaviour.
+- **LPV/CLPV: NOT built** (probe (c) 400) — no card; the 400 is recorded
+  above. **Meta "Leads" is NOT an insights metric on these accounts** (G1
+  documented `leads` 400; re-confirmed by the 400-class of (c)): if the PO
+  expects a Leads figure, the source is **G2 Instant Forms (deferred)** or
+  **G3 live clicks/CAPI Lead events** — recorded here, never faked from
+  insights.
+
+**Tunnel host note (host-agnostic rule):** the current quick-tunnel is
+`https://vegas-legacy-fully-presenting.trycloudflare.com` → `:3000`
+(re-verified live 2026-11-05; the prior `naval-look-noble-sampling` + the
+2026-10-30 `oak-alpha-rewards-workstation` subdomains are DEAD — HTTP 000).
+Quick-tunnel subdomains change on every cloudflared restart, so all webhook /
+ingest / xt.js host references stay **host-agnostic** in code + docs; the
+live URL is the current value only. **G10 later swaps this for a stable Vercel
+domain** — keep it that way.
+
+**Verification:** `pnpm typecheck` 0 · `pnpm test` **152/152** (was 138; +14 D-08:
+range semantics ×5, dashboardAll range-slice ×3, balance persistence ×3,
+probe-table regressions ×3) · `pnpm build` 0 · live smoke: `/?range=yesterday|7d|last_year|custom`
+all 200 with the rollup label; `/meta` balance card ("— (not pulled)" until
+the next real pull). No pull row touched; `.env`/`dev.db`/scratch never
+committed.

@@ -55,3 +55,6 @@ pnpm-debug.log*
 .g4-evidence.txt
 # G8 scratch evidence (labelled CAPI replay proof)
 .g8-evidence.txt
+# Meta API capability probe scratch (distilled matrix is committed in DECISIONS.md)
+.meta-probe-findings.txt
+.meta-probe.txt

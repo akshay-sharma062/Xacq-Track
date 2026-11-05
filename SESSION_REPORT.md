@@ -312,3 +312,57 @@ CAPI POST evidence (`Meta HTTP 200` + fbtrace_id) above. No pull row touched
 (EMQ≥7 on Purchase) is claimed from a Meta-reported EMQ on G3-matched Purchase
 traffic — not from the labelled replay. Then G9 (Meta-vs-Track reconciliation
 + weekly PDF) and G10/G11 (platform go-live).
+
+## D-08 — Meta data expansion + date-range filters (2026-11-05) [REVIEW]
+Ticket: "Meta data expansion + date-range filters" — Phase-1 HONEST API PROBE
+before building anything UI; build ONLY what the probe proved.
+
+**Phase 1 — probe** (`scripts/meta-probe.ts`, `pnpm meta:probe`, read-only,
+ONE account first = cl_upcurvv's `act_4749960348632164`, NO DB writes, token
+redacted; findings in `.meta-probe-findings.txt`, gitignored):
+- (a) account-level `fields=balance` → **200** (`"balance":"218661"` INR) —
+  G1 never pulled it; Balance is a real, buildable card.
+- (b) insights time params: `time_preset` (all 5) / `date_start`+`date_stop`
+  / `period=daily` all 200 **but IGNORED** — every one returns the same
+  default 30-day rollup (rows=1, distinctDays=1). **No per-day rows exist.**
+  The ONE honored range param is a well-formed `time_range` (G1's 400 was the
+  empty/malformed form). `time_range` returns a *range rollup* (one row per
+  ad), not per-day — so it can't feed per-day storage either.
+- (c) `lpv` / `clpv` → **400** `#100 not valid for fields` at BOTH ad and
+  account insights level → **no LPV/CLPV card; the 400 is recorded.**
+
+**Phase 2 — built only what the probe proved:**
+- Per-day pull: **SKIPPED** (the "if daily rows come back" conditional was
+  false — never faked). Existing 30-day rollup rows stay; fixed point
+  ad=3808/adSet=1172/spend=3808/fxRate=1 untouched; WAL intact.
+- Balance: `AdAccount.balance` + `balanceAsOf` (additive `db push`);
+  `pullAdAccount` now fetches `fields=balance` **isolated** (a balance 4xx
+  records the exact Meta string, never fails the spend pull, never clears the
+  last stored value — the card shows the last known or "—", not 0). Surfaces
+  on dashboard account cards + `/meta`.
+- Dashboard date-range control (`?range=` Yesterday/7D/30D/Last Month/Last
+  Year/Custom): the SPEND family always shows the closest available stored
+  data (the 30-day rollup) — any non-30d range carries the honest label
+  "30-day rollup only (Meta API limit — see DECISIONS D-08)", never an
+  extrapolated number. The LEAD family (real timestamps) is sliced to the
+  range. Absent `?range` = byte-identical to pre-D-08 behaviour.
+- Meta "Leads" mapping recorded (DECISIONS D-08): NOT an insights metric on
+  these accounts (`leads` 400 documented in G1, re-confirmed) — the source is
+  G2 Instant Forms (deferred) or G3 clicks; never faked from insights.
+
+**Tunnel host (host-agnostic rule):** current live subdomain
+`vegas-legacy-fully-presenting.trycloudflare.com` → `:3000` (re-verified
+2026-11-05, HTTP 200); `naval-look-noble-sampling` (2026-11-04) +
+`oak-alpha-rewards-workstation` (2026-10-30) are DEAD (HTTP 000). All
+webhook/ingest/xt.js host references stay host-agnostic in code + docs; the
+live URL is the current value only. G10 swaps this for a stable Vercel domain.
+
+**Verification:** `pnpm typecheck` 0 · `pnpm test` **152/152** (+14 D-08:
+range ×5, dashboardAll range-slice ×3, balance persistence ×3, probe-table ×3)
+· `pnpm build` 0 · live smoke: `/?range=yesterday|7d|last_year|custom` all 200
+with the rollup label; `/meta` balance card "— (not pulled)" until the next
+real pull. No `.env`/`dev.db`/scratch committed.
+
+**Next gate:** next real `pnpm pull:once` populates `balance` (verify the card
+shows the number, not "—"); then G3 live traffic (EMQ≥7 for G8), G9, G10/G11
+as before.
