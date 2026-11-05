@@ -19,7 +19,7 @@
  */
 import { prisma } from "../lib/prisma";
 import { pullAllAccounts, onboardAccounts, normalizeAdAccountRef } from "../lib/meta/pull";
-import { backfillMissingInr, BackfillResult } from "../lib/fx-store";
+import { backfillMissingInr, BackfillResult, backfillInrZeroRows, InrZeroBackfillResult } from "../lib/fx-store";
 import { acquirePullLock, releasePullLock } from "./pull-lock";
 import { readFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -203,6 +203,13 @@ export interface FastTickResult {
   skipped: string[];
   pulled: { ran: number; failures: number };
   fx: { updatedRows: number; rates: { currency: string; day: string; rate: number; source: string | null }[] };
+  /**
+   * D-09: the bulk `inrSpend=0` backfill (money-integrity safety net) that runs
+   * on every tick — same code path as `pnpm fx:backfill`. `blocked` is
+   * non-empty when a currency had no stored rate and every live FX source was
+   * unreachable (rows left untouched, exact errors recorded — never faked).
+   */
+  inrZero: InrZeroBackfillResult;
 }
 
 /**
@@ -221,16 +228,26 @@ export async function runFastTick(
       skipped: [`fast tick skipped — ${lock.reason}`],
       pulled: { ran: 0, failures: 0 },
       fx: { updatedRows: 0, rates: [] },
+      inrZero: {
+        scanned: 0, consistent: 0, rateStamped: 0, recovered: 0, updates: 0,
+        blocked: [], totalInrBefore: 0, totalInrAfter: 0, zeroRowsBefore: 0, zeroRowsAfter: 0,
+      },
     };
   }
   try {
     const res = await runDuePulls();
     const fx: BackfillResult = await backfillMissingInr(prisma);
+    // D-09: the bulk `inrSpend=0` backfill runs on every tick (same path as
+    // `pnpm fx:backfill`). It is idempotent — after a clean run the re-run is a
+    // no-op; a BLOCKED currency (no stored rate + all sources down) leaves its
+    // rows untouched and records the exact FX error strings.
+    const inrZero: InrZeroBackfillResult = await backfillInrZeroRows(prisma);
     return {
       lock,
       skipped: res.skipped,
       pulled: { ran: res.ran.length, failures: res.failures.length },
       fx: { updatedRows: fx.updatedRows, rates: fx.rates },
+      inrZero,
     };
   } finally {
     releasePullLock({ lockPath: opts.lockPath, pid: opts.pid });
@@ -301,7 +318,7 @@ export function startFastLoop(): { stop: () => void } {
     lastFired = now;
     const res = await runFastTick();
     console.log(
-      `[pull-scheduler] fast tick ${res.lock.acquired ? "ran" : "skipped"}: pulled ${res.pulled.ran}/${res.pulled.failures} fail, fx backfilled ${res.fx.updatedRows} rows`
+      `[pull-scheduler] fast tick ${res.lock.acquired ? "ran" : "skipped"}: pulled ${res.pulled.ran}/${res.pulled.failures} fail, fx backfilled ${res.fx.updatedRows} rows, inr-zero backfill ${res.inrZero.updates} updates / ${res.inrZero.blocked.length} blocked`
     );
   };
   const timer = setInterval(() => void tick(), 60_000);

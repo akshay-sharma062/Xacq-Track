@@ -20,7 +20,9 @@
     "pull:fast": "tsx src/jobs/pull-scheduler.ts fast",
     "meta:verify-token": "node scripts/verify-meta-token.mjs",
     "capi:replay": "tsx scripts/g8-replay.ts",
-    "meta:probe": "tsx scripts/meta-probe.ts"
+    "meta:probe": "tsx scripts/meta-probe.ts",
+    "fx:backfill": "tsx scripts/fx-backfill.ts",
+    "balance:check": "tsx scripts/balance-check.ts"
   },
   "engines": {
     "node": ">=22"

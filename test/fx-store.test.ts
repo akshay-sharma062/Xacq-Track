@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
 import { freshDb } from "./helpers";
-import { ensureRate, resolveDayRates, fetchLiveFxRate, backfillMissingInr, FX_API } from "../src/lib/fx-store";
+import { ensureRate, resolveDayRates, fetchLiveFxRate, backfillMissingInr, backfillInrZeroRows, FX_API } from "../src/lib/fx-store";
 import type { TestDb } from "./helpers";
 
 /**
@@ -157,6 +157,85 @@ describe("fetchLiveFxRate — multi-source fallback (§4)", () => {
     expect(r.errors[0]).toContain("open.er-api.com");
     expect(r.errors[2]).toContain("exchangerate.host");
     spy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D-09: the bulk inrSpend=0 backfill (money-integrity safety net). INR rows
+// stamp the 1:1 identity; a non-INR row converts with its stored per-day rate
+// (or the currency's most recent stored rate); no rate + all live sources down
+// = BLOCKED with the exact error strings, rows untouched — never a fake rate.
+// ---------------------------------------------------------------------------
+describe("backfillInrZeroRows — D-09 bulk backfill (idempotent, no fake rates)", () => {
+  async function seedSpendRows() {
+    const db = await freshDb(); // tenancy: cl_upcurvv + G1 ad-account link row
+    const p = db.prisma;
+    const cl = await p.client.findFirst();
+    const acct = await p.adAccount.findFirst();
+    if (!cl || !acct) throw new Error("bootstrap tenancy missing");
+    await p.adCampaign.create({ data: { metaId: "d09_cam", adAccountId: acct.id, clientId: cl.id, name: "c", status: "ACTIVE" } });
+    await p.adSet.create({ data: { metaId: "d09_set", adAccountId: acct.id, campaignMetaId: "d09_cam", clientId: cl.id, name: "s", status: "ACTIVE" } });
+    await p.ad.create({ data: { metaId: "d09_ad", adAccountId: acct.id, adSetMetaId: "d09_set", clientId: cl.id, name: "d09", status: "ACTIVE" } });
+    await p.spend.createMany({
+      data: [
+        // AED native-only money gap: positive spend, no INR yet (rate available per-day).
+        { adMetaId: "d09_ad", adAccountId: acct.id, clientId: cl.id, day: "2026-11-01", currency: "AED", spend: 100, inrSpend: 0, inrRate: 0, impressions: 0, reach: 0, clicks: 0, linkClicks: 0, thruPlays: 0 },
+        // A zero-spend INR ad-day placeholder (Meta writes these for spend-less days).
+        { adMetaId: "d09_ad", adAccountId: acct.id, clientId: cl.id, day: "2026-11-02", currency: "INR", spend: 0, inrSpend: 0, inrRate: 0, impressions: 0, reach: 0, clicks: 0, linkClicks: 0, thruPlays: 0 },
+      ],
+    });
+    return db;
+  }
+
+  it("recovers a native-only AED row at its per-day stored rate; stamps an INR zero row 1:1; idempotent", async () => {
+    const db = await seedSpendRows();
+    const p = db.prisma;
+    // The ticket's AED rate, stored for the row's day (open.er-api.com 2026-11-02).
+    await p.fxRate.create({ data: { date: "2026-11-01", currency: "AED", rateToInr: 25.849976, source: "open.er-api.com" } });
+
+    const r1 = await backfillInrZeroRows(p);
+    expect(r1.scanned).toBe(2);
+    expect(r1.recovered).toBe(1); // the AED money row
+    expect(r1.rateStamped).toBe(1); // the INR zero-spend row got the 1:1 stamp (value unchanged)
+    expect(r1.updates).toBe(2);
+    expect(r1.blocked).toHaveLength(0);
+
+    const rows = await p.spend.findMany({ where: { adMetaId: "d09_ad" }, orderBy: { day: "asc" } });
+    expect(rows[0].inrSpend).toBe(Math.round(100 * 25.849976 * 100) / 100); // AED → INR
+    expect(rows[0].inrRate).toBe(25.849976);
+    expect(rows[1].inrRate).toBe(1); // INR identity stamped, not left at 0
+    expect(rows[1].inrSpend).toBe(0); // 0 × 1 = 0 — still correct
+
+    // Idempotency: a second run changes nothing. The AED row is no longer
+    // inrSpend=0 (it was recovered), so the scan now sees only the zero-spend
+    // INR placeholder — and writes nothing (rate already stamped).
+    const r2 = await backfillInrZeroRows(p);
+    expect(r2.scanned).toBe(1); // only the inrSpend=0 zero-spend row remains
+    expect(r2.updates).toBe(0);
+    expect(r2.recovered).toBe(0);
+    expect(r2.consistent).toBe(1);
+    expect(r2.totalInrAfter).toBe(r2.totalInrBefore);
+    await db.close();
+  });
+
+  it("BLOCKS with the exact FX-source errors (rows untouched, no fake rate) when no stored rate + all sources down", async () => {
+    const db = await seedSpendRows();
+    const p = db.prisma;
+    // No AED FxRate row at all, and every live source is unreachable.
+    const spy = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValue(new Error("network unreachable"));
+    const r = await backfillInrZeroRows(p);
+    expect(r.blocked.length).toBeGreaterThan(0);
+    expect(r.blocked[0].currency).toBe("AED");
+    expect(r.blocked[0].errors).toHaveLength(3); // one exact string per source
+    expect(r.blocked[0].errors[0]).toContain("open.er-api.com");
+    // The AED money row was NOT touched (no fake rate written).
+    const aed = await p.spend.findFirst({ where: { adMetaId: "d09_ad", day: "2026-11-01" } });
+    expect(aed?.inrSpend).toBe(0);
+    expect(aed?.inrRate).toBe(0);
+    spy.mockRestore();
+    await db.close();
   });
 });
 

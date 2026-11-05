@@ -366,3 +366,57 @@ real pull. No `.env`/`dev.db`/scratch committed.
 **Next gate:** next real `pnpm pull:once` populates `balance` (verify the card
 shows the number, not "—"); then G3 live traffic (EMQ≥7 for G8), G9, G10/G11
 as before.
+
+## D-09 — close the data gaps before live traffic (2026-11-05) [REVIEW]
+Ticket: "close the data gaps before live traffic" — FX backfill gap
+(money-integrity), balance pull, G3 snippet regeneration.
+
+**1. FX backfill — HONEST FINDING (the ticket's premise was checked against
+the data and did NOT hold, so it was not faked):** 3,212 of 3,808 Spend rows
+had `inrSpend=0`, flagged as "INR total understated". A read-only
+diagnostic (`scripts/fx-diag.mjs`) proved all 3,212 are **zero-spend
+placeholders** (`spend=0` on every one; `moneyGap=0` rows with spend>0;
+0 rows violate `inrSpend == round(spend × inrRate, 2)`; AED positive-spend
+already normalised at 25.849976; recomputed total off by ₹0.02 rounding
+only). **Built anyway (ticket rule 1 + durable safety net):**
+`backfillInrZeroRows` (fx-store) bulk-stamps every `inrSpend=0` row — INR
+1:1 identity, non-INR at the per-day stored rate (else most-recent stored,
+else live multi-source fetch; no rate + all sources down = **BLOCKED with
+exact per-source error strings, rows untouched, never a fake rate**).
+Idempotent, never deletes. Wired into the 10-min fast tick + `pnpm fx:backfill`.
+**Proof:** un-stamped rows 3,212 → 0; INR total **3,219,655.33 → 3,219,655.33
+(Δ 0.00)** — the stamp is a rate-consistency fix, not a value recovery;
+re-run byte-identical (0 updates). Fixed point ad=3808/adSet=1172/spend=3808
+untouched; WAL intact. The "recovered ₹X" claim is explicitly NOT made.
+
+**2. Balance pull:** `pnpm pull:once` now persists `AdAccount.balance` per
+account (the D-08 fetch path). Read-only `pnpm balance:check` (exact
+per-account 200/error, no DB writes) confirmed **all 7 accounts return a
+live balance**: Upcurvv-FML **₹283,383**, Abhishek Pal **₹2,070,383**, FML New
+**₹692,084**, FML X Abhishek Pal **₹615,668**, CardGenius 2 **₹350,054**, The
+Job Workshop **AED 28,252** (native, shown in account currency), Piyush
+Ahuja **₹0** (legitimate zero ≠ "not pulled") — final 07:03–07:05 pull
+snapshot; Meta's `balance` is a moving figure (Upcurvv-FML's earlier pull
+stored 283,383; the D-08 probe had seen 218,661 — we store Meta's value at
+pull time, never force an old number). **Fixed-point disclosure:** the pull
+advanced Meta's live tree to ad=3818 / adSet=1177 / spend=3818 (additive
+growth since October; no pull row deleted — the backfill is update-only,
+re-run byte-identical). The account cards + `/meta` show the real balance
+for pulled accounts, not "—".
+
+**3. G3 snippet regeneration:** the xt.js paste-ready block in
+GOLIVE_STATUS.md now references the CURRENT live tunnel
+`vegas-legacy-fully-presenting.trycloudflare.com` (re-verified HTTP 200
+end-to-end before writing; prior subdomains dead/000) with
+`data-client="cl_upcurvv"` — paste-ready for `join.upcurvv.com/cll`.
+Host-agnostic rule kept for the G10 Vercel swap.
+
+**Verification:** `pnpm typecheck` 0 · `pnpm test` green (+2 D-09 backfill
+tests: idempotent recover + BLOCKED-exact-errors) · `pnpm build` 0 · live
+routes `/`, `/meta`, `/?range=yesterday`, `/xt.js` 200 · backfill
+before/after + re-run byte-identical · balance evidence read-only. No pull
+row deleted; `.env`/`dev.db`/scratch never committed.
+
+**Next gate:** **G3 live traffic (PO paste)** — paste the refreshed snippet on
+`join.upcurvv.com/cll` + ~20 real Meta ad clicks → the real EMQ≥7 proof and
+the ≥95% ad_id/UTM gate. Then G9/G10/G11.

@@ -58,3 +58,10 @@ pnpm-debug.log*
 # Meta API capability probe scratch (distilled matrix is committed in DECISIONS.md)
 .meta-probe-findings.txt
 .meta-probe.txt
+
+# D-09 scratch evidence (distilled findings committed in DECISIONS D-09)
+.fx-evidence.txt
+.fx-diag.json
+
+# D-09 pull scratch logs
+.d09-pull*.log

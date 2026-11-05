@@ -377,3 +377,75 @@ probe-table regressions ×3) · `pnpm build` 0 · live smoke: `/?range=yesterday
 all 200 with the rollup label; `/meta` balance card ("— (not pulled)" until
 the next real pull). No pull row touched; `.env`/`dev.db`/scratch never
 committed.
+
+## D-09 — close the data gaps before live traffic: bulk FX backfill + balance population + G3 snippet (2026-11-05)
+
+**FX backfill gap — HONEST FINDING (the ticket's premise was checked against
+the data first, and it did NOT hold):** the live DB showed 3,212 of 3,808
+Spend rows with `inrSpend=0`, flagged as "INR-normalised total understated".
+A read-only diagnostic (`scripts/fx-diag.mjs` → `.fx-diag.json`, gitignored)
+proved all 3,212 zero-rows are **zero-spend placeholders** Meta writes for
+ads that had no spend in the pull window (`spend=0` on every one of them;
+`moneyGap = 0` rows with `spend>0` and `inrSpend=0`), and a per-row integrity
+check found **0 violations** of `inrSpend == round(spend × inrRate, 2)`.
+The AED account's positive-spend money was already normalised at the stored
+per-day rate (₹14,859.85 AED → ₹384,126.75 INR at 25.849976, matching the
+D-05 figure); the recomputed "correct" INR total differed from the stored
+total by **₹0.02 (rounding)**, i.e. **no material under-statement**.
+
+**What was still built (the ticket's rule 1, and the durable safety net):**
+- `backfillInrZeroRows()` (src/lib/fx-store.ts) — bulk backfill over EVERY
+  `inrSpend=0` row: INR rows stamp the 1:1 identity rate (`inrSpend := spend`);
+  non-INR rows convert at the per-day stored FxRate, else the currency's most
+  recent stored rate, else a live multi-source fetch (persisted on success);
+  a currency with no stored rate + all three FX sources unreachable →
+  **BLOCKED with the exact per-source error strings**, rows left untouched
+  (never a fake rate). Idempotent (re-run = 0 updates); **never deletes
+  rows** (update/upsert only).
+- `pnpm fx:backfill` (scripts/fx-backfill.ts) — one-time run with the
+  idempotency proof built in (run-1 + re-run); evidence → `.fx-evidence.txt`
+  (gitignored).
+- **Wired into the 10-min fast tick** (`runFastTick` now returns `inrZero`):
+  the safety net runs on every tick, so a future pull that lands a native-only
+  AED row (rate 0) is re-converted automatically within ~10 min.
+
+**Proof (before/after, 2026-11-05):** zero-row count 3,212 → **0 un-stamped**
+(`inrSpend=0 AND inrRate=0`); INR total **3,219,655.33 → 3,219,655.33
+(Δ 0.00)** — the backfill STAMPED the 3,212 zero-spend rows (rate consistency,
+value unchanged by design), it did not fabricate value; re-run byte-identical
+(0 updates). Fixed point untouched: ad=3808 / adSet=1172 / spend=3808; WAL
+journal intact. The "INR total was understated by ₹X" claim is **explicitly
+not made** — the data showed it was not understated (0.02 paise rounding).
+
+**Balance pull (item 2):** `pnpm pull:once` now populates
+`AdAccount.balance` on every successful account pull (the D-08 fetch path).
+All 7 accounts return a balance on the read-only `pnpm balance:check`
+(`scripts/balance-check.ts`, exact per-account 200/error, no DB writes):
+Upcurvv-FML **₹283,383**, Abhishek Pal **₹2,070,383**, FML New
+**₹692,084**, FML X Abhishek Pal **₹615,668**, CardGenius 2 **₹350,054**, The
+Job Workshop **AED 28,252** (native AED, shown in account currency — not
+faked into INR), Piyush Ahuja **₹0** (a legitimate zero balance, distinct
+from "— = not pulled yet"). Meta's `balance` is a moving "bill amount due"
+— the stored value is Meta's figure at pull time (07:03–07:05 IST, 2026-11-05),
+never forced to D-08's earlier probe snapshot (218,661 for Upcurvv-FML).
+**Fixed-point disclosure:** the D-09 pull advanced Meta's live ad tree —
+ad 3808→**3818** / adSet 1172→**1177** / spend 3808→**3818** (live-tree
+growth since the October snapshot, ADDITIVE — no pull row deleted; the
+backfill itself is update-only and re-run byte-identical). The account cards
++ `/meta` now show the real Meta balance for pulled accounts, not "—".
+
+**G3 snippet regeneration (item 3):** the xt.js paste-ready snippet in
+GOLIVE_STATUS.md was refreshed to the CURRENT live tunnel
+`https://vegas-legacy-fully-presenting.trycloudflare.com` (re-verified
+HTTP 200 end-to-end 2026-11-05) with `data-client="cl_upcurvv"`. The prior
+`oak-…`/`naval-…` subdomains are DEAD (000). Host stays host-agnostic in
+code/docs (G10 swaps to the Vercel domain). PO action to make G3 live
+traffic + the EMQ≥7 proof happen: **paste the snippet on
+join.upcurvv.com/cll, then ~20 real Meta ad clicks.**
+
+**Verification:** `pnpm typecheck` 0 · `pnpm test` **154/154** (+2 D-09
+backfill tests: idempotent recover + BLOCKED-exact-errors) · `pnpm build` 0 · live
+check: `/` + `/meta` + `/?range=yesterday` + `/xt.js` all 200 · backfill
+before/after + re-run evidence above · `pull:once` balance evidence
+(read-only DB reads, above). No pull row deleted; `.env`/`dev.db`/scratch
+never committed.

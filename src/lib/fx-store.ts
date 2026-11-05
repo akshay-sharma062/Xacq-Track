@@ -146,6 +146,135 @@ export interface BackfillResult {
 }
 
 /**
+ * D-09 — bulk backfill over EVERY `inrSpend=0` Spend row (money-integrity
+ * safety net), stronger than `backfillMissingInr` (which only touches
+ * non-INR `spend>0` rows):
+ *
+ *   - INR rows: identity — `inrSpend := spend` (rate 1:1), the row is stamped
+ *     `inrRate=1` so it is fully consistent, never left at rate 0.
+ *   - Non-INR rows: the row's (day, currency) stored FxRate, else the currency's
+ *     most recent stored rate, else a live multi-source fetch (persisted on
+ *     success). `inrSpend := round(spend × rate, 2)`.
+ *   - If a currency has NO stored rate AND every live source is unreachable →
+ *     the affected rows are left untouched and the result is BLOCKED with the
+ *     EXACT per-source error strings (never a fake rate).
+ *   - Idempotent: a second run finds nothing to change (byte-identical).
+ *   - NEVER deletes rows (upsert/update only).
+ *
+ * The diagnostic finding that shapes the honest report (2026-11-05, dev.db):
+ * all 3,212 `inrSpend=0` rows are also `spend=0` (Meta's zero-spend
+ * placeholder rows — `0 × rate = 0` is CORRECT), `moneyGap = 0`, and the
+ * AED positive-spend rows are already normalised at the stored 25.849976
+ * rate. So a run over today's data updates 0 rows in VALUE — that is the
+ * expected, proven-correct outcome, not a failure.
+ */
+export interface InrZeroBackfillResult {
+  scanned: number; // inrSpend=0 rows examined
+  consistent: number; // already inrSpend == round(spend × rate, 2) + rate stamped
+  rateStamped: number; // zero-spend rows that had inrRate=0, now stamped (value unchanged)
+  recovered: number; // rows where a real value was recovered (inrSpend 0 → spend × rate)
+  updates: number; // total rows written this run
+  blocked: { currency: string; day: string; errors: string[] }[]; // no rate + all sources down
+  totalInrBefore: number;
+  totalInrAfter: number;
+  zeroRowsBefore: number;
+  zeroRowsAfter: number;
+}
+
+export async function backfillInrZeroRows(prisma: PrismaClient): Promise<InrZeroBackfillResult> {
+  const totalInrBefore = (await prisma.spend.aggregate({ _sum: { inrSpend: true } }))._sum.inrSpend ?? 0;
+  const zeroRowsBefore = await prisma.spend.count({ where: { inrSpend: 0 } });
+  const zeros = await prisma.spend.findMany({
+    where: { inrSpend: 0 },
+    select: { id: true, currency: true, day: true, spend: true, inrRate: true, inrSpend: true },
+  });
+
+  const out: InrZeroBackfillResult = {
+    scanned: zeros.length,
+    consistent: 0,
+    rateStamped: 0,
+    recovered: 0,
+    updates: 0,
+    blocked: [],
+    totalInrBefore: Math.round(totalInrBefore * 100) / 100,
+    totalInrAfter: totalInrBefore,
+    zeroRowsBefore,
+    zeroRowsAfter: zeroRowsBefore,
+  };
+
+  // Resolve one rate per (currency, day) group; a second run reuses stored rows.
+  type ZeroRow = (typeof zeros)[number];
+  const groups = new Map<string, ZeroRow[]>();
+  for (const r of zeros) {
+    const key = `${r.currency}|${r.day}`;
+    const arr = groups.get(key) ?? [];
+    arr.push(r);
+    groups.set(key, arr);
+  }
+  for (const [, rows] of groups) {
+    const cur = rows[0].currency.toUpperCase();
+    const day = rows[0].day;
+    let rate: number;
+    let liveErrors: string[] = [];
+    if (cur === "INR") {
+      rate = 1; // identity (spec 5.7: INR accounts convert 1:1, never fetched)
+    } else {
+      const stored = await prisma.fxRate.findUnique({
+        where: { date_currency: { date: day, currency: cur } },
+      });
+      if (stored) {
+        rate = stored.rateToInr; // per-day stored rate for THIS row's day (ticket rule 1)
+      } else {
+        // No per-day rate: live multi-source fetch, else most-recent stored
+        // (the ticket's "stored FxRate 25.849976" path), else 0 = BLOCKED.
+        const live = await fetchLiveFxRate(cur);
+        if (live.rate > 0) {
+          await prisma.fxRate.upsert({
+            where: { date_currency: { date: day, currency: cur } },
+            update: {},
+            create: { date: day, currency: cur, rateToInr: live.rate, source: live.source ?? "unknown" },
+          });
+          rate = live.rate;
+        } else {
+          const fallback = await prisma.fxRate.findFirst({ where: { currency: cur }, orderBy: { date: "desc" } });
+          rate = fallback?.rateToInr ?? 0;
+          liveErrors = live.errors; // exact per-source strings (surfaced, not faked)
+        }
+      }
+    }
+    if (rate <= 0) {
+      // BLOCKED: no stored rate and every FX source unreachable — leave the
+      // rows untouched and record the EXACT error strings (ticket guardrail).
+      out.blocked.push({ currency: cur, day, errors: liveErrors });
+      continue;
+    }
+    for (const r of rows) {
+      const target = Math.round(r.spend * rate * 100) / 100;
+      const needsWrite = r.inrSpend !== target || (r.inrRate === 0 && target === 0);
+      if (!needsWrite) {
+        out.consistent++;
+        continue;
+      }
+      await prisma.spend.update({
+        where: { id: r.id },
+        data: { inrRate: rate, inrSpend: target },
+      });
+      out.updates++;
+      if (r.spend > 0) out.recovered++;
+      else out.rateStamped++;
+    }
+  }
+
+  const totalInrAfter = (await prisma.spend.aggregate({ _sum: { inrSpend: true } }))._sum.inrSpend ?? 0;
+  const zeroRowsAfter = await prisma.spend.count({
+    where: { inrSpend: 0, inrRate: 0 },
+  });
+  out.totalInrAfter = Math.round(totalInrAfter * 100) / 100;
+  out.zeroRowsAfter = zeroRowsAfter;
+  return out;
+}
+
+/**
  * Backfill `inrSpend` for stored NATIVE-ONLY spend rows (spec 5.7 / §4):
  * rows whose currency is not INR, `inrRate = 0` and `spend > 0` — i.e. pulled
  * when no FX rate was available. For each affected (currency, day) it
