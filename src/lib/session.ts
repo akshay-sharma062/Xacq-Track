@@ -110,11 +110,16 @@ export type Action =
   | "send_capi"
   | "pull_meta"
   | "edit_settings"
-  | "delete_lead";
+  | "delete_lead"
+  // D-13: manage the webhook & API-key panel (multiple connections per
+  // client×platform; hash-only key storage; one-time secret reveal).
+  // SECURITY SURFACE — owner + admin only; no other role may mint keys or
+  // webhook connections.
+  | "admin_integrations";
 
 const MATRIX: Record<Role, Action[]> = {
-  owner: ["view", "view_phone", "export", "assign_lead", "move_stage", "add_note", "add_task", "merge_duplicate", "send_capi", "pull_meta", "edit_settings", "delete_lead"],
-  admin: ["view", "view_phone", "export", "assign_lead", "move_stage", "add_note", "add_task", "merge_duplicate", "send_capi", "pull_meta", "edit_settings", "delete_lead"],
+  owner: ["view", "view_phone", "export", "assign_lead", "move_stage", "add_note", "add_task", "merge_duplicate", "send_capi", "pull_meta", "edit_settings", "delete_lead", "admin_integrations"],
+  admin: ["view", "view_phone", "export", "assign_lead", "move_stage", "add_note", "add_task", "merge_duplicate", "send_capi", "pull_meta", "edit_settings", "delete_lead", "admin_integrations"],
   media_buyer: ["view", "export", "send_capi", "pull_meta"],
   sales_rep: ["view", "view_phone", "assign_lead", "move_stage", "add_note", "add_task", "merge_duplicate"],
   viewer: ["view"], // read-only (client portal default, spec 5.10)

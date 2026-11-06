@@ -70,6 +70,10 @@ model Client {
   events       Event[]
   payments     Payment[]
 
+  // D-13: multiple webhook connections + API keys (see the models below).
+  apiKeys       ApiKey[]
+  webhookEndpoints WebhookEndpoint[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -533,6 +537,10 @@ model User {
   calls     Call[]
   auditLogs AuditLog[]
 
+  // D-13: rows this user created (audit trail on keys + webhook connections).
+  apiKeysCreated       ApiKey[]
+  webhookEndpointsCreated WebhookEndpoint[]
+
   createdAt DateTime @default(now())
 }
 
@@ -691,4 +699,89 @@ model ReportConfig {
   createdAt DateTime @default(now())
 
   @@index([clientId])
+}
+
+// ---------------------------------------------------------------------------
+// D-13 — Webhook & API key management (multiple connections per
+// client×platform; the FlexiFunnels case: no provider API key, only a
+// webhook URL we point the provider at, with a per-connection secret).
+// Additive: no column drops, no re-parents, no pull-row changes. The legacy
+// Client.webhookSecret stays the single-secret backward-compat path.
+// ---------------------------------------------------------------------------
+
+// D-13: API keys (presented-key → hash → compare, so hash-only storage is
+// correct here — the plain key is shown ONCE at creation, then only the
+// SHA-256 hash is kept). `purpose` scopes which surface it authenticates.
+model ApiKey {
+  id        String @id @default(cuid())
+  label     String // "production" | "staging-test" | …
+  clientId  String? // null = workspace-level admin key
+  client    Client? @relation(fields: [clientId], references: [id])
+  keyHash   String // SHA-256 of the random key string (NEVER the plain key)
+  purpose   String // "ingest" | "api" | "webhook_verify"
+  createdBy String
+  created   User @relation(fields: [createdBy], references: [id])
+  createdAt DateTime @default(now())
+  revokedAt DateTime?
+  lastUsedAt DateTime?
+
+  @@unique([clientId, label]) // one "production" per client, but "production" + "staging-test"
+  @@index([clientId])
+  @@index([purpose])
+}
+
+// D-13: one inbound webhook CONNECTION (multiple allowed per client×platform).
+// Two FlexiFunnels accounts, two Razorpay test+prod, … each get a row here
+// with its OWN secret. `inboundUrl` is the exact string the PO pastes into
+// the provider dashboard (…&conn=<this id>); the route verifies the HMAC
+// against THIS row's secret, not the legacy Client.webhookSecret.
+//
+// endpointSecret storage (D-13 design decision): REVERSIBLE in this dev
+// build — the generated secret is stored plainly (same stance as the legacy
+// Client.webhookSecret column, which the G4/D-06 path already verifies
+// against). It MUST stay retrievable: the HMAC gateways (Razorpay
+// `x-razorpay-signature = HMAC-SHA256(secret, rawBody)`, Cashfree
+// `cf-signature = HMAC-SHA256(secret, ts:body)`) recompute an HMAC with the
+// secret as the KEY — a SHA-256 hash of the secret cannot reproduce that
+// HMAC, so hash-only storage would break every HMAC gateway connection
+// (the exact "two Razorpay test+prod" case this ticket exists for).
+// "Shown exactly once" is enforced at the API/UI layer: only the create
+// response returns the plain value; the admin list/GET/log endpoints never
+// do. At G10 (Postgres) this column becomes KMS/Supabase-encrypted.
+model WebhookEndpoint {
+  id             String @id @default(cuid())
+  clientId       String
+  client         Client @relation(fields: [clientId], references: [id])
+  platform       String // a SourcePlatform key (enforced at write in the route)
+  label          String // "flexifunnels-live" | "razorpay-prod" | …
+  endpointSecret String // plain in dev (KMS at G10); shown once at creation
+  inboundUrl     String // <base>/api/webhooks/<platform>?client=<id>&conn=<id>
+  active         Boolean @default(true) // soft-revoke, not delete (log stays intact)
+  createdBy      String
+  created        User @relation(fields: [createdBy], references: [id])
+  createdAt      DateTime @default(now())
+  lastReceivedAt DateTime?
+
+  connLogs WebhookConnectionLog[]
+
+  @@unique([clientId, platform, label]) // "razorpay-prod" + "razorpay-test" ok, two "razorpay-prod" not
+  @@index([clientId])
+  @@index([platform])
+}
+
+// D-13: per-CONNECTION receive log (keyed to the endpoint, so each of the
+// multiple connections on a client×platform has its own trail). `payloadHash`
+// is the SHA-256 of the raw body (dedup + audit) — the raw payload itself
+// still goes to the existing WebhookLog table as today, never here.
+model WebhookConnectionLog {
+  id        String @id @default(cuid())
+  endpointId String
+  endpoint  WebhookEndpoint @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+  receivedAt DateTime @default(now())
+  status    String // "ok" | "failed" | "duplicate"
+  error     String?
+  payloadHash String // SHA-256 of the raw body (dedup key); raw body stays in WebhookLog
+
+  @@index([endpointId])
+  @@index([receivedAt])
 }

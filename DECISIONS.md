@@ -832,3 +832,118 @@ that flip (marking CAPI/EMQ live in a money-gated way) is a SEPARATE
 `[REVIEW]` commit — flagged, not forced into this measurement commit.
 **Next gate = real G3 clicks → 95% + EMQ≥7; then G4 real-provider / G5 /
 G9.**
+
+## D-13 — Webhook & API key management panel: multiple connections per client×platform (2026-11-07)
+
+**The problem:** FlexiFunnels (and any provider) pushes events to a webhook
+URL *we* point it at — no provider API key. G4/D-06's routing
+(`POST /api/webhooks/<platform>?client=<id>`) is single-secret-per-client
+(`Client.webhookSecret`), so it cannot carry **multiple concurrent
+connections on the same client×platform** (two FlexiFunnels accounts,
+Razorpay test+prod, …) — each connection has its OWN secret and its own
+inbound URL. D-13 adds a first-class panel + schema for that.
+
+**Schema (3 new models, all ADDITIVE — no deletes, no re-parents):**
+- `ApiKey`: `label`, `clientId?` (null = workspace-level admin key),
+  `keyHash` (SHA-256 of the random key — **NOT the plain key**; the plain
+  is shown ONCE at creation, then gone), `purpose`
+  (`ingest`|`api`|`webhook_verify`), `createdBy` (User), `createdAt`,
+  `revokedAt?`, `lastUsedAt?`; `@@unique([clientId, label])`.
+- `WebhookEndpoint`: one webhook CONNECTION — `clientId`, `platform`
+  (an adapter-catalog key, enforced at write), `label`, `endpointSecret`
+  (the connection's own secret), `inboundUrl`
+  (`<base>/api/webhooks/<platform>?client=<id>&conn=<id>`), `active`
+  (soft-revoke, not delete), `lastReceivedAt?`, `createdBy`;
+  `@@unique([clientId, platform, label])` — "razorpay-prod" +
+  "razorpay-test" ok, two "razorpay-prod" not.
+- `WebhookConnectionLog`: per-CONNECTION receive log (keyed to the
+  endpoint, so each connection on a client×platform has its own trail) —
+  `receivedAt`, `status` (`ok`|`duplicate`|`failed`), `error?`,
+  `payloadHash` (SHA-256 of the raw body — dedup/audit; the raw payload
+  still goes to the existing `WebhookLog`).
+
+**SECRET-STORAGE DECISION (PO-confirmed deviation, recorded here):**
+`ApiKey.keyHash` stays **hash-only** (presented-key → hash → compare is
+the flow; a one-way hash is correct). But `WebhookEndpoint.endpointSecret`
+is stored **REVERSIBLY** (plain in this dev build; KMS/encrypted at G10) —
+*not* a one-way hash — because the repo's HMAC gateways recompute an HMAC
+with the secret as the KEY (Razorpay `x-razorpay-signature =
+HMAC-SHA256(secret, rawBody)`, Cashfree `cf-signature =
+HMAC-SHA256(secret, ts:body)`). An HMAC cannot be reproduced from the
+secret's SHA-256 hash, so hash-only storage would break every HMAC-gateway
+connection — the exact "two Razorpay test+prod" case this ticket exists
+for. "Shown exactly once" is therefore enforced at the **API/UI layer**:
+only the create response returns the plain value; the admin list/GET/log
+endpoints never do (route contract tests pin both).
+
+**API (admin-only, new `admin_integrations` permission on the existing
+`can` matrix — owner + admin only, no new role system):**
+`GET/POST /api/admin/keys` (+`/revoke`, idempotent soft-revoke) ·
+`GET/POST /api/admin/webhooks` (+`/revoke`, soft-revoke keeps the
+connection log intact; +`/:id/logs` = last-100 conn log rows,
+payload-hash only). Create returns the plain key/secret EXACTLY ONCE
+(`showOnce: true` + warning). Client-scoped creates/revokes are
+audit-logged; a workspace-level key (clientId=null) has no AuditLog
+client-FK target — its own row is its audit trail (documented).
+
+**Route change (additive, legacy path byte-for-byte unchanged):** the
+existing `POST /api/webhooks/[platform]` gains an OPTIONAL
+`&conn=<endpointId>`. Present → resolve that WebhookEndpoint (active,
+same client + platform) and verify against THAT row's secret; a
+bad/revoked/foreign conn id is a clean **404 "unknown connection"** —
+never a 500, and never a silent fallback to the legacy secret (which
+would verify against the wrong key). Absent → the legacy
+`Client.webhookSecret` path (G4/D-06 behaviour untouched). The conn rate-
+limit key is conn-scoped (`wh:<client>:<platform>:<conn|legacy>`) so two
+connections can't starve each other. Each received conn event records one
+`WebhookConnectionLog` row (payload hash) + bumps `lastReceivedAt`.
+
+**UI: `/admin/integrations` (server-gated by `admin_integrations`, hidden
+for non-admins):** Keys table + Generate-key (platform-independent:
+label + purpose + client scope, workspace-level default) · Webhook
+table (all clients, per-row inboundUrl + last-received + status +
+per-row "logs" drawer = last-100 payload-hash rows) + Generate-webhook
+(label + client + platform dropdown built from the adapter catalog, not
+hardcoded) · both with the copy-now + confirm-before-reveal +
+"cannot be retrieved later" treatment · per-row Revoke (soft,
+lastReceivedAt stays visible) · a **FlexiFunnels quick-action card**
+(UI-only: renders each active FlexiFunnels connection's inboundUrl + the
+two paste targets — Form Settings → Webhooks for leads, Products →
+Product Rules → Webhook for purchases; it does NOT drive any provider-side
+config). Sidebar: "Webhooks & API keys" under Admin.
+
+**Migration status:** the 3 tables were applied to dev.db via `db push`
+(ADDITIVE — pure CREATE TABLE/INDEX, no DROP/ALTER; this repo has no
+versioned-migration baseline, so additivity was PROVED by before/after
+row-count snapshots: fixed point ad=3818 / adSet=1177 / spend=3818
+unchanged, G1=cl_upcurvv, WAL `journal_mode=wal` intact). The
+test suite additionally proved one **real bug the API path had never
+exercised**: `createWebhookEndpoint` omitted the required `createdBy`
+FK (a Prisma `PrismaClientValidationError` — `Argument 'client' is
+missing` — on the endpoint create), fixed in `integrations.ts`.
+
+**Verification:** `test/d13.test.ts` **18/18** — hash-only key storage
++ one-time reveal, TWO connections on the same client×platform verify
+INDEPENDENTLY (adapter `verify` accepts its own secret, rejects the
+sibling's; `resolveEndpointForRoute` scopes to active + same client +
+platform), legacy no-conn path unchanged (route contract asserts),
+revoked conn → 404 (soft revoke, never a delete), audit-log write on
+create/revoke, conn-log write on receipt (payload-hash only — the model
+has no raw-payload column to leak), route contract asserts pinning the
+security surface (never-selects-keyHash/endpointSecret, showOnce
+copy, 404/403/409 paths, conn-scoped rate limit). `pnpm typecheck` 0 ·
+`pnpm build` exit 0 · full `pnpm test` green (195/195) · prod `next
+start` restarted on the new build (no `next dev` was started by this
+ticket; a pre-existing user dev instance on :3001 was observed — see
+the D-13 caveats in SESSION_REPORT) · no pull row touched (fixed point
+ad=3818/adSet=1177/spend=3818 + WAL re-verified) · `.env`/`dev.db`/
+`.next`/scratch NOT in the commit (`.d13-*` scratch gitignored). No
+new `.env` keys: the per-connection secret is GENERATED at creation (a
+DB row, not an env value) — the ticket's "no new .env keys" holds.
+
+**Next gate = PO generates a FlexiFunnels webhook here
+(`/admin/integrations` → Generate webhook, platform = FlexiFunnels) +
+copies the inboundUrl + `x-webhook-secret` into the FlexiFunnels
+dashboard (the quick-action card's two paste targets) + drives ONE real
+FlexiFunnels order → G4 FlexiFunnels real-provider proof
+(the first G4 platform unblocked WITHOUT a gateway API key), then G5/G9.**

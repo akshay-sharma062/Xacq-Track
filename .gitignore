@@ -84,3 +84,6 @@ pnpm-debug.log*
 
 # G3 prep scratch evidence (distilled findings committed in DECISIONS G3-prep)
 .g3-*
+
+# D-13 scratch evidence (additive-migration proof; distilled findings in DECISIONS D-13)
+.d13-*

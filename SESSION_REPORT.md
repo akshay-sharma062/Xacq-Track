@@ -742,3 +742,155 @@ in `.env` (never committed).
 
 **Next gate = real G3 clicks → 95% + EMQ≥7; then G4 real-provider / G5 /
 G9.**
+
+## D-13 — Webhook & API key management panel (2026-11-07) [REVIEW]
+Ticket: multiple API keys + multiple webhooks per client×platform — the
+FlexiFunnels connection (no provider API key; we point it at a webhook
+URL we own, with a per-CONNECTION secret). G4's single
+`Client.webhookSecret` can't carry two FlexiFunnels accounts or
+Razorpay test+prod on one client×platform. **This is the [REVIEW]
+commit (admin + security surface: role-gated routes, hash-only key
+storage, additive Prisma schema — PO reviews before push; local only).**
+
+**Schema (additive — 3 new models, no deletes/re-parents):**
+`ApiKey` (hash-only `keyHash` = SHA-256 of the random key; the plain key
+shown EXACTLY ONCE at creation) · `WebhookEndpoint` (one webhook
+CONNECTION: its own `endpointSecret` + `inboundUrl`
+`…&conn=<id>` + `active` soft-revoke + `lastReceivedAt`) ·
+`WebhookConnectionLog` (one row per received conn event: status +
+SHA-256 `payloadHash`, never the raw payload — that still goes to the
+existing `WebhookLog`). Applied to dev.db via `db push`; additivity
+PROVEN by before/after row-count snapshots — fixed point
+ad=3818/adSet=1177/spend=3818 unchanged, G1=cl_upcurvv, WAL
+`journal_mode=wal` stands. (This repo has no versioned-migration
+baseline — `db:migrate` here IS `db push`.)
+
+**Security-critical lib — `src/lib/integrations.ts`:**
+`sha256Hex` / `generateApiKey` (`xacq_` + 32 random bytes base64url,
+hash stored) / `keyMatchesHash` (constant-time) /
+`generateWebhookSecret` (32 random bytes, reversible-stored) /
+`createApiKey`+`revokeApiKey` (idempotent soft-revoke) /
+`createWebhookEndpoint`+`revokeWebhookEndpoint` /
+`resolveEndpointForRoute` (active + same client + platform, else null →
+route 404s) / `recordConnectionLog`.
+
+**PO decision recorded (the one deviation from the ticket text):**
+`WebhookEndpoint.endpointSecret` is stored **reversibly**, not
+SHA-256-hashed — the repo's HMAC gateways (Razorpay `HMAC(secret,
+body)`, Cashfree `HMAC(secret, ts:body)`) recompute an HMAC with the
+secret as the KEY; a hash of the secret cannot reproduce it, so
+hash-only would break every HMAC-gateway connection. "Shown once" is
+enforced at the API/UI layer instead (only the create response returns
+the plain value; list/GET/log endpoints never do). `ApiKey.keyHash`
+stays hash-only (presented-key → hash → compare is that flow).
+
+**API (admin-only; new `admin_integrations` action on the existing `can`
+matrix — owner + admin only, no new role system):**
+`GET/POST /api/admin/keys` (+`/revoke`) · `GET/POST
+/api/admin/webhooks` (+`/revoke`, +`/:id/logs` = last-100 conn log
+rows, payload-hash only). Create returns the plain key/secret EXACTLY
+ONCE (`showOnce:true` + warning). Client-scoped creates/revokes
+audit-logged; a workspace-level key (clientId=null) has no AuditLog
+client-FK target — its own row is its audit trail (documented, not
+silently dropped).
+
+**Route change (additive; legacy path byte-for-byte unchanged when
+`&conn=` is absent):** `POST /api/webhooks/[platform]` now accepts an
+OPTIONAL `&conn=<endpointId>`: present → that WebhookEndpoint's secret
+verifies; bad/revoked/foreign id → clean **404 "unknown connection"**
+(never a 500, never a silent fallback to the legacy secret). Conn
+rate-limit key is conn-scoped. Each received conn event → one
+`WebhookConnectionLog` row + `lastReceivedAt` bump.
+
+**UI — `/admin/integrations` (server-gated by `admin_integrations`,
+hidden for non-admins; Sidebar "Webhooks & API keys" under Admin):**
+Keys table (label/scope/purpose/created/last-used/status + per-row
+revoke) + Generate-key (workspace-level default) · Webhook table
+(label/client/platform/inboundUrl/last-received/status + per-row
+revoke + per-row "logs" drawer = last-100 payload-hash rows) +
+Generate-webhook (client + platform dropdown built from the adapter
+catalog, not hardcoded) · one-time-reveal treatment on both (copy-now
++ confirm-before-reveal + "cannot be retrieved later") · a **UI-only
+FlexiFunnels quick-action card** (each active FlexiFunnels connection's
+inboundUrl + the two paste targets: Form Settings → Webhooks for
+leads, Products → Product Rules → Webhook for purchases; it does NOT
+drive any provider-side config).
+
+**Tests — `test/d13.test.ts` 18/18:** hash-only key storage + one-time
+reveal · TWO connections on the same client×platform verify
+INDEPENDENTLY (the FlexiFunnels adapter's `verify` accepts its own
+connection's `x-webhook-secret` and rejects the sibling's;
+`resolveEndpointForRoute` scopes to active + same client + platform) ·
+legacy no-conn path unchanged (route contract asserts) · revoked conn
+→ 404 (soft-revoke keeps the log intact) · audit-log write on
+create/revoke + conn-log write on receipt (payload-hash only; the model
+has no raw-payload column to leak) · route contract asserts pinning the
+security surface (no keyHash/endpointSecret in any list select,
+showOnce copy, 404/403/409 paths, conn-scoped rate limit). The suite
+also caught + we fixed a REAL bug the API path had never exercised:
+`createWebhookEndpoint` omitted the required `createdBy` FK (a Prisma
+`PrismaClientValidationError`, "Argument `client` is missing").
+
+**FlexiFunnels quick-action (the PO paste instructions):**
+`/admin/integrations` → **Generate webhook** (client = the FlexiFunnels
+client, platform = **FlexiFunnels**, e.g. label `flexifunnels-leads`) →
+copy the **inboundUrl** (`…/api/webhooks/flexifunnels?client=<id>&conn=<id>`;
+the current dev base is the quick-tunnel host — G10 re-points to the
+Vercel domain, so re-generate after G10 or update the pasted URL) and
+the one-time **secret** → in FlexiFunnels: **Form Settings → Webhooks**
+paste the inbound URL as the webhook URL + the secret in the
+`x-webhook-secret` header field (leads); **Products → Set Product
+Rules → Webhook** paste the same for purchase events (each destination
+may get its OWN connection — that's the point of D-13).
+
+**Verification (final, at commit time):** `npx vitest run
+test/d13.test.ts` **18/18** · full `pnpm test` **195/195 (16 files)** ·
+`pnpm typecheck` 0 · `pnpm build` exit 0 (all 6 new routes in the
+build manifest: `/admin/integrations` + 5 `/api/admin/*`) · stop-prod
+→ build → start-prod done, prod on :3000 answering 200 on the new
+build · live zero-side-effect smoke: `GET /api/admin/keys` +
+`GET /api/admin/webhooks?client=all` = 200 empty-state; bogus
+`&conn=d13_bogus_conn` POST → **404 `{"error":"unknown connection"}`**
+exactly as designed · no test rows left in dev.db
+(`apiKey=0 webhookEndpoint=0 webhookConnectionLog=0`; the pre-existing
+legacy `webhookLog=109` untouched) · fixed point
+**ad=3818 / adSet=1177 / spend=3818** + **WAL `journal_mode=wal`**
+re-verified after the commit · no `.env`/`dev.db`/`.next`/scratch in
+the commit (`.d13-*` scratch gitignored; pre-commit leak-check clean)
+· **no new `.env` keys** (the per-connection secret is a generated DB
+row, not an env value — the ticket's constraint holds).
+
+**Two honest environment caveats (NOT D-13 defects; recorded, not
+silently papered over):**
+1. **Quick-tunnel host rotated dead:** the recorded G3-close-out host
+   `docs-reserve-inside-parking.trycloudflare.com` now answers **000
+   (DNS failure)** — cloudflared IS running (a process since 10:37)
+   but the quick-tunnel subdomain rotated. The D-13 FlexiFunnels
+   paste (and any live webhook) must use the CURRENT tunnel subdomain
+   (re-verify via `curl https://<subdomain>/` like the G3 flow) or the
+   G10 Vercel domain. `NEXT_PUBLIC_BASE_URL` is NOT set in `.env`, so
+   a freshly-generated `inboundUrl` defaults to `http://localhost:3000`
+   (correct for local testing; set the env or re-generate on the live
+   host before the PO paste).
+2. **A `next dev` instance (user terminal tab) is live on :3001**
+   alongside the prod `next start` on :3000 — that is the
+   single-writer hazard the standing rule forbids. It pre-dated this
+   commit's prod restart and was NOT started by this session; the
+   user should close that tab to keep dev.db single-writer (or accept
+   the hazard knowingly). This commit itself is clean: built with
+   prod stopped, no `next dev` was started here.
+
+**[REVIEW] commit:** this very commit on `main` — local only, NOT pushed
+(the PO pushes after review). Subject: "D-13 Webhook & API key management
+panel: multiple connections per client×platform [REVIEW]" — 17 files,
++1822/−10. Resolve the exact SHA with
+`git log -1 --grep="D-13 Webhook & API key" --oneline` (SHA at prep
+time: `d909fb1`; it may differ by one because a commit's recorded SHA
+can't literally be its own final SHA after a docs amend — `git log -1`
+is authoritative).
+
+**Next gate = PO generates a FlexiFunnels webhook here + pastes the
+inboundUrl + secret into the FlexiFunnels dashboard (the quick-action
+card's two targets) + drives ONE real FlexiFunnels order → G4
+FlexiFunnels real-provider proof (the first G4 platform unblocked
+WITHOUT a gateway API key), then G5/G9.**

@@ -28,6 +28,7 @@ const NAV: Item[] = [
   { href: "/admin", label: "Team & roles", section: "Admin" },
   { href: "/audit", label: "Audit log", section: "Admin" },
   { href: "/settings", label: "Settings", section: "Admin" },
+  { href: "/admin/integrations", label: "Webhooks & API keys", section: "Admin" },
 ];
 
 export function Sidebar({ workspace }: { workspace: string }) {
