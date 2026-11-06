@@ -748,3 +748,87 @@ snippet into that client's landing-page `<head>`; (2) fix the Meta ad URLs
 (4) re-run `pnpm g3:measure` + the CAPI queue — the 95% gate + EMQ≥7
 numbers become real. **Next gate = G3 live clicks → real EMQ≥7 + 95% gate,
 then G4 real-provider / G5 / G9.**
+
+## G3 live-traffic close-out — 95% gate + EMQ≥7: evidence state, PO actions (2026-11-06)
+
+**Status: pre-click AWAITING LIVE TRAFFIC — measured, not claimed.** No live
+clicks have landed yet, so the 95% ad_id/UTM gate and the EMQ≥7-on-Purchase
+proof are both **AWAITING (0 live clicks)** — a 0 is the correct state,
+never faked. This ticket captured the committed evidence and the PO action
+list; it did NOT invent results.
+
+**(a) Ad-URL gate — resolved to its true state (carry-forward (a)):**
+- `node scripts/audit-ad-urls.mjs` (all 7 stored AdAccount rows, read-only)
+  re-run 2026-11-06: **5 accounts UNAUDITABLE** (upcurvv 60 ·
+  cl_piyush-ahuja 357 · cl_cardgenius-2 15 · cl_fml-new 232 ·
+  cl_the-job-workshop 331 · cl_abhishek-pal-fml 600 ads read, 0 readable
+  destination links in all — the G1 token reads ad rows but NOT creative
+  link content), **1 account transient** (cl_fml-x-abhishek-pal hit Meta's
+  per-account rate limit mid-audit → 0 read, re-runs after cooldown),
+  **1 PO-covered** (cl_upcurvv: the G3-prep run read all 60 of its ads
+  unscored, but the PO's own declared template in `G3_INPUTS.md` —
+  `join.upcurvv.com/cll?campaign_id={{campaign.id}}&adset_id={{adset.id}}&
+  ad_id={{ad.id}}` — is exactly the shape xt.js's extractor reads;
+  `node scripts/audit-g3-link.mjs "<that template>"` = PASSES by
+  construction, recorded as evidence).
+- Fields probe (read-only, token never printed): even the account-level
+  `adcreatives` read returns `link=null` + empty `object_story_spec`
+  attachments for this token; the ads-level `creative{link}` spelling is a
+  `#100` invalid field. So the link-content gap is a **token
+  capability**, not a token-config bug.
+- Resolution path (the PO's choice — this ticket does NOT pick one
+  silently): **Option 1** the PO reads each account's ad destination URLs
+  in Ads Manager and reports which lack the template/UTM params (the
+  Meta-side fix is PO-manual; we RECORD the ad ids needing fixing).
+  **Option 2** the PO grants a token with creative-content
+  (`ads_read`+creative link) read; then `node scripts/audit-ad-urls.mjs`
+  re-classifies every account to a real PASS / N-ads-to-fix list. Until
+  evidence lands, the verdict stays **UNAUDITABLE** (not a PASS, not a
+  fake "no URLs").
+
+**(b) Shared page — DECISION RECORDED, unresolved (carry-forward (b)):**
+`join.affluentindianshub.com/vpaxdvju` serves BOTH `cl_abhishek-pal-fml`
+and `cl_fml-x-abhishek-pal` (PO-confirmed shared). One `<script>` carries
+one `data-client`, so the G3-prep rule stands: that page gets NO snippet
+until the PO either (1) adds a client hint the page keys on (query/route
+that resolves to exactly one of the two) or (2) splits the page. That is
+a **PO decision to record, not a code choice** — the GO L I V E snippet
+table keeps both conditional blocks (E/F) and states the rule.
+
+**(c) cl_piyush-ahuja — OUT OF G3 live-traffic scope (carry-forward (c)):**
+no landing page supplied → its snippet row is "no landing page supplied"
+(honest, not a gap); G3 clicks will not produce traffic for it. Its CAPI
+side is separate (no pixel key + no URL key → simulated, D-11/D-12).
+
+**G2 still FINAL-deferred (PO decision 2026-11-03, `0c9ad59`):** Instant
+Forms stay out of the G3 checklist — the Phase-1 "instant-form lead"
+sub-gate is dropped; G3 live traffic is xt.js clicks / G4, never
+`meta_form_lead`.
+
+**Pre-click baseline (committed 2026-11-06, `pnpm g3:measure`):**
+cl_upcurvv 3/3 carry (all 3 = legacy seed `meta_form_lead` rows,
+`adRefId=null`, NOT live clicks) → `<20` → AWAITING; the other 6 clients
+= 0 live clicks → AWAITING; **EMQ≥7 on Purchase: no Meta-reported
+`event_match_quality` on any Purchase → AWAITING (not claimed)**.
+Re-run after the PO's clicks + a CAPI queue run.
+
+**Host re-verify:** `docs-reserve-inside-parking.trycloudflare.com`
+(`/` + `/xt.js` 200, 5,078 B, byte-identical to `public/xt.js`) — the
+recorded G3-prep host was still live (no cloudflared rotation this
+session); `vegas-…`/`oak-…`/`naval-…` remain dead (000).
+
+**PO manual actions (code can't do these):** (1) paste each client's
+snippet into that landing page's `<head>` (resolve the shared-page hint /
+page-split for the abhishek page first); (2) resolve the ad-URL gate via
+(a)'s Option 1 (Ads-Manager URL report → we record the fix list) or
+Option 2 (upgraded token → re-run the audit); (3) drive ~20 real Meta ad
+clicks; (4) re-run `pnpm g3:measure` (the 95% gate becomes real) and the
+CAPI queue (Purchase events hit Meta → read the Meta-reported
+`event_match_quality`; **EMQ≥7 is proven ONLY by a Meta-reported value — a
+hub-log 200 without EMQ is not a pass**).
+
+**If the live clicks produce the first REAL Purchase→CAPI→EMQ≥7 proof:**
+that flip (marking CAPI/EMQ live in a money-gated way) is a SEPARATE
+`[REVIEW]` commit — flagged, not forced into this measurement commit.
+**Next gate = real G3 clicks → 95% + EMQ≥7; then G4 real-provider / G5 /
+G9.**
