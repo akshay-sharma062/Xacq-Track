@@ -681,3 +681,70 @@ the live totals (Impressions 2,73,65,855 · Reach 1,52,04,026 · Clicks
 2,74,812 · CTR 1.0% · CPC ₹12) in All + per-client views. No pull row
 touched (fixed point ad=3818/adSet=1177/spend=3818, WAL intact); URLs
 live only in `.env` (never committed); `.d12-*` scratch gitignored.
+
+## G3 prep — live-traffic-ready + measurable across all 7 clients (2026-11-06)
+
+**Status: all-client snippets ready + ad-URL audit done + measurement
+script ready; AWAITING PO paste + live clicks.** No live numbers are
+claimed — 0 + "AWAITING LIVE TRAFFIC" is the correct state until real
+clicks land (D-03 honesty rule; G2 Instant Forms stays FINAL-deferred, so
+the doc's Phase-1 instant-form gate is dropped from the G3 checklist —
+source is xt.js clicks / G4, not `meta_form_lead`).
+
+**Host (re-verified at session start):** the ticket's named host
+`vegas-legacy-fully-presenting` is DEAD (000) — quick-tunnel subdomains
+rotate every cloudflared restart. The running instance minted
+`docs-reserve-inside-parking.trycloudflare.com` (`/` 200 + `/xt.js` 200,
+5,078 B, byte-identical to `public/xt.js`). GOLIVE's snippet table +
+Public-tunnel row now point at it; the dead-host record is kept.
+
+**Task 1 — per-client paste-ready snippets (GOLIVE_STATUS.md):** the
+single upcurvv-only block is replaced by a 7-client table: 5 solo pages
+(cl_upcurvv / cl_cardgenius-2 / cl_fml-new / cl_the-job-workshop-ad-account
++ their PO-supplied URLs) + the **shared page** `join.affluentindianshub.com/
+vpaxdvju` (abhishek-pal-fml + fml-x-abhishek-pal, PO-confirmed shared) +
+`cl_piyush-ahuja` = "no landing page supplied" (honest, not a gap).
+**Shared-page ambiguity resolution:** one `<script>` carries only ONE
+`data-client`, so the shared page's snippet must NOT silently pick one —
+it needs a client query/hint (or the PO splits the page) that resolves to
+exactly one of the two before the tag is emitted; until decided, that page
+gets NO block (E/F are conditional on the resolution).
+
+**Task 2 — ad-URL dynamic-params audit (all 7 stored AdAccount rows):**
+`node scripts/audit-ad-urls.mjs` (extended from `META_AD_ACCOUNT_IDS` to
+every `AdAccount` row; read-only; token never printed). Verdict 2026-11-06:
+**all 7 accounts = UNAUDITABLE** — the G1 pull token reads ad rows but
+NOT their creative destination links (`creative{object_story_spec}`
+resolves id-only; 0 of 3,818 scanned links readable: upcurvv 60 ·
+piyush 357 · cardgenius-2 15 · fml-x-abhishek-pal 1,572 ·
+abhishek-pal-fml 1,273 · fml-new 232 · the-job-workshop 331). This is
+neither a "≥95% by construction" PASS nor a confirmed "no URLs" — the PO
+supplies the ad destination links (or a token with creative-content read)
+and the audit re-classifies. The fix is **Meta-side (Ads Manager)**; the
+audit only reports which ad ids to change.
+
+**Task 3 — G3 measurement (`pnpm g3:measure`, read-only):** per-client
+ad_id/UTM carry rate on landing-page Touchpoints (+ Leads owning one) and
+the EMQ≥7 proof status (Meta-reported `event_match_quality` on Purchase
+only). The ≥95% gate is MET only on ≥20 live clicks; below that (or 0) it
+is "AWAITING LIVE TRAFFIC". Current measure (2026-11-06): cl_upcurvv
+3/3 carry (all 3 are **legacy seed** `meta_form_lead` rows, `adRefId=null`
+— not live clicks) → <20 → AWAITING; the other 6 clients 0 clicks →
+AWAITING; **EMQ≥7 = no Meta-reported EMQ yet → AWAITING (not claimed)**.
+Re-run after the PO's clicks + a CAPI queue run.
+
+**Verification:** `pnpm build` 0 · all three read-only scripts run clean
+(audit `node scripts/audit-ad-urls.mjs` rc=0 + per-account verdicts;
+`pnpm g3:measure` rc=0 all-AWAITING; snippet host-check via curl 200 +
+5,078 B). Pull rows untouched (ad=3818/adSet=1177/spend=3818,
+G1=cl_upcurvv); WAL intact; token/pixels/URLs stay in `.env` (never in
+chat or a commit); `.g3-*` scratch gitignored; no `next dev` next to
+prod.
+
+**PO manual actions (code can't do these):** (1) paste each client's
+snippet into that client's landing-page `<head>`; (2) fix the Meta ad URLs
+(audit above + the live Ads Manager) to carry `{{campaign.id}}`/
+`{{adset.id}}`/`{{ad.id}}` or UTM; (3) drive ~20 real Meta ad clicks;
+(4) re-run `pnpm g3:measure` + the CAPI queue — the 95% gate + EMQ≥7
+numbers become real. **Next gate = G3 live clicks → real EMQ≥7 + 95% gate,
+then G4 real-provider / G5 / G9.**

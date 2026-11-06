@@ -81,3 +81,6 @@ pnpm-debug.log*
 .d12-*.cjs
 .d12-*.log
 .d12-*.sh
+
+# G3 prep scratch evidence (distilled findings committed in DECISIONS G3-prep)
+.g3-*

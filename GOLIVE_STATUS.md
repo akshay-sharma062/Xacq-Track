@@ -29,7 +29,7 @@ Last updated: G1 LIVE · G2 SKIPPED-DEFERRED · D-01/D-02 recenter+purge DONE ·
 | **Meta data expansion (D-08)** | `scripts/meta-probe.ts` + `src/lib/meta/pull.ts` + `src/lib/dashboard.ts` | **HONEST API PROBE first, then build-only-what's-proven.** Probe (read-only, `pnpm meta:probe`, findings in `.meta-probe-findings.txt` — a 400 is a finding, not a failure): (a) `balance` = **200** (G1 never pulled it); (b) `time_preset` all-5 / `date_start`+`date_stop` / `period=daily` all 200 **but IGNORED** (same 30-day rollup row back — no per-day); `time_range` (well-formed) = the ONE honored range param; (c) `lpv`/`clpv` = **400** at ad + account level. **Built:** Balance stored (`AdAccount.balance/balanceAsOf`, additive) + shown on account cards + `/meta` (isolation: a balance 4xx never fails the pull, never clears last value); **per-day pull SKIPPED** (no preset returned per-day rows — the conditional was false, not faked); dashboard **date-range control** (Yesterday/7D/30D/Last Month/Last Year/Custom) slices the lead family to the range, the spend family shows the closest available (30-day rollup) with the honest **"30-day rollup only (Meta API limit — see D-08)"** label, never an extrapolated number. LPV/CLPV: **no card** (400 recorded). Meta "Leads" is NOT an insights metric here (G1 `leads` 400; re-confirmed) — source = G2 Instant Forms (deferred) or G3 clicks; recorded, not faked. | `pnpm meta:probe` · `pnpm pull:once` (balance now in every pull) · `/?range=…` | **DONE (probe-proved scope only; balance pulls on next real pull)** | D-08 · 2026-11-05 · `pnpm test` 152/152 (+14) · `pnpm build` 0 |
 | **Date-range filters (D-08)** | `src/lib/dashboard.ts` `resolveSpendRange` + `RangePicker.tsx` | Dashboard date-filter control: Yesterday / 7D / 30D / Last Month / Last Year / Custom range — applies to the KPI row, daily-spend chart and account cards, computed over stored Spend rows; for a range the API probe couldn't fetch (anything but the native 30d), shows the closest available data with the honest label **"30-day rollup only (Meta API limit)"** — **never** extrapolates or fakes a number | `?range=` + `?rFrom/?rTo` (custom) | **DONE** | D-08 · `.meta-probe-findings.txt` (probe matrix) · range tests |
 | **Account balance card (D-08/D-09)** | `pull.ts` `fetchAccountBalance` → `AdAccount.balance/balanceAsOf` → dashboard cards + `/meta` | **LIVE 2026-11-05 (D-09):** every successful `pnpm pull:once` fetches `GET /act_…?fields=balance` (probe-proven 200, D-08) and persists it; a balance 4xx is isolated (never fails the pull, never clears the last value → card shows "— (not pulled)", not 0). `pnpm balance:check` (`scripts/balance-check.ts`) is a read-only per-account 200/error verifier. 2026-11-05: **all 7 accounts returned a live balance** — Upcurvv-FML **₹283,383** · Abhishek Pal **₹2,070,383** · FML New **₹692,084** · FML X Abhishek Pal **₹615,668** · CardGenius 2 **₹350,054** · The Job Workshop **AED 28,252** (native, shown in account currency) · Piyush Ahuja **₹0** (legitimate zero, distinct from "not pulled"). Meta's `balance` is a moving "bill amount due" — the stored value is Meta's value at pull time, not a frozen number. | `pnpm pull:once` / 10-min tick · `pnpm balance:check` | **LIVE (7/7 balances populated)** | D-08/D-09 · read-only DB evidence + balance:check output |
-| **G3 xt.js snippet host (D-09)** | `GOLIVE_STATUS.md` snippet block | **Refreshed 2026-11-05 to the current live tunnel** `https://vegas-legacy-fully-presenting.trycloudflare.com` (re-verified HTTP 200 end-to-end before writing; `oak-…`/`naval-…` dead = 000) with `data-client="cl_upcurvv"` — paste-ready for `join.upcurvv.com/cll`. Host-agnostic rule kept: the live subdomain is the *current value only*; G10 swaps to the Vercel domain, no host is hard-coded in code. | PO pastes the snippet + drives ~20 real Meta ad clicks | **READY (snippet + re-verified host; AWAITING PO paste → G3 live traffic)** | D-09 · next gate = G3 live traffic → real EMQ≥7 proof |
+| **G3 xt.js snippet host (D-09) + per-client table (G3 prep)** | `GOLIVE_STATUS.md` snippet block | **Refreshed 2026-11-06 to the current live tunnel** `https://docs-reserve-inside-parking.trycloudflare.com` (re-verified HTTP 200 end-to-end: `/` + `/xt.js` = 5,078 bytes, byte-identical to `public/xt.js`; `vegas-…`/`oak-…`/`naval-…` dead = 000). The single upcurvv-only block is now a **PER-CLIENT table** (all 7 clients; shared `affluentindianshub.com/vpaxdvju` page = no silent single-client pick — a client hint or page split is the PO's call; `cl_piyush-ahuja` = "no landing page supplied", honest not a gap). Host-agnostic rule kept: the live subdomain is the *current value only*; G10 swaps to the Vercel domain, no host is hard-coded in code. | PO pastes each snippet + drives ~20 real Meta ad clicks | **READY (7-client snippets + re-verified host; AWAITING PO paste → G3 live traffic)** | D-09 + G3 prep · next gate = G3 live traffic → real EMQ≥7 proof |
 | **Ad-set metrics + client scoping (D-10)** | `src/lib/reports.ts` `adSetPerformance` + `sumAdSets` + `src/lib/dashboard.ts` + `page.tsx` + `ReportSwitcher.tsx` `ad_set` | Per-ad-set table (name, campaign, spend native + INR, impressions, reach, clicks, CPM, CPC, ROAS where sales exist) built from **stored Spend/AdSet rows ONLY** (never a live call, never an estimate). **LPV/CLPV are NOT columns** — `LPV_CLPV_NOTE` = "LPV/CLPV not returned by Meta v23.0 on these accounts (400 on lpv/clpv — D-08/D-10 probe); not shown; cost/LPV is not guessed" (a zero-column or a guessed cost/LPV would be a fake number). **Client scoping fixed**: selecting a client restricts EVERY block (KPIs, accounts, ad sets, campaigns, ads, CAPI); the active-entity count bug (`adAccountId IN clientIds` = cuid vs `cl_…`, always 0; creatives scanned all clients) is now `clientId IN clientIds`-scoped — **test: client A selected shows zero client B ad sets** (and the reverse). | `/?client=<id>` · `/reports?key=ad_set` | **DONE (stored-rows only; LPV absent by probe)** | D-10 · client-scoping A-vs-B + ad-set LPV-absent tests |
 | **Live range fetch — server-only (D-10)** | `src/lib/meta/live-range.ts` + `LiveRange` table + `dashboard.ts` + `page.tsx` | "Filter apply = API hit", SERVER-ONLY: a `yesterday`/`7d` on-demand insights fetch the dashboard server component triggers (never a Meta call from the browser), **per-account, per-day cached** (additive `LiveRange` rows, unique `adAccountId+rangeKey+day`; same day+range reuses → no repeated Meta hit, idempotent, tested). A Meta 4xx stores the **EXACT error string** as a BLOCKED row (UI shows the note, never an empty grid / fake zero); no token = honest skip. INR-normalised via the stored daily FX rate. The 30-day Spend rollup fixed point is **never written to here** (separate additive table, no deletes). Re-probe (`pnpm range:probe`) confirmed only **yesterday/7d** are servable (365/730d clamp to 30d; `period=day` ignored → Meta serves one range rollup, not per-day rows); unservable ranges keep the "30-day rollup only" label, never a faked year. UI shows "live, HH:MM IST" (fresh <1h) / "cached" + a clamped note. | `/?range=yesterday&client=<id>` · `/?range=7d` | **DONE (server-only, per-day cache, BLOCKED-exact, no Spend writes)** | D-10 · cache-idempotency + BLOCKED-exact-string + no-token-skip tests |
 | **CAPI send-boundary guard (D-11)** | `src/lib/meta/capi.ts` `isValidMetaPixelId` + `sendQueue` + `postOneCapiEvent` + `src/lib/capi.ts` `toMetaWireEvent` | The `'pixel'`-placeholder 400 (`"Object with ID 'pixel' does not exist"`, the stale G4-era string on the Nov-3 `OutboundEvent` rows) is **eliminated at the send boundary**: a pixel must be a **numeric string (6–20 digits)** — validated in `sendQueue` AND `postOneCapiEvent` (the shared primitive `g8-replay` uses); an invalid/placeholder pixel → **SIMULATE** (local mark, no network, exact note, `pixelUsed=null`) — a placeholder can never reach Meta again, and never records itself as "the pixel used". **Action-source rule (live re-run's honest next wall):** Meta subcode **2804039** on these pixels rejects the `"system"` source ("…such as 'website'"); a "website" source REQUIRES `event_source_url` and a URL is never fabricated → a live POST now ALSO requires the client's funnel source URL (or an injected one); without it the row stays **SIMULATED with the exact note** (Meta-invalid events are never POSTed, so no 400 loop). `toMetaWireEvent` drops the web-only `user_data` signals (`client_ip_address`/`client_user_agent`) on a non-web source (identity signals `ph/em/fbc/fbp` kept). **Proof 2026-11-05:** full 7-client re-run → **0 rows carry the `'pixel'` error**; OutboundEvent = sent 44 (simulated, exact notes) · skipped 1 · **failed 0**; the labelled replay on `cl_upcurvv`'s numeric `.env` pixel returned **Meta HTTP 200 + fbtrace_id `Ab_zLGf_…`** (the pixel resolves to Meta; the 200 carries no hub-log event_id/EMQ — same honest G8 caveat, EMQ≥7 stays gated on G3-matched traffic). | `POST /api/capi` · `pnpm capi:replay` | **DONE (placeholder impossible; live path = valid pixel + a source URL)** | D-11 · 8 new regression tests (placeholder→simulate, boundary-reject, .env-numeric-URL, no-URL→simulate-note, URL→live POST, web-signals-kept) | D-11 · SUPERSEDED by D-12 (the source URL now comes from `.env`, not a Funnel row — the 39 simulated rows are LIVE since D-12) |
@@ -49,7 +49,7 @@ Last updated: G1 LIVE · G2 SKIPPED-DEFERRED · D-01/D-02 recenter+purge DONE ·
 
 | Item | Value | Status |
 |---|---|---|
-| Public URL (CURRENT) | `https://vegas-legacy-fully-presenting.trycloudflare.com` → `http://localhost:3000` | **LIVE** — re-verified 2026-11-05 (HTTP 200 end-to-end through the tunnel). Prior subdomains `oak-alpha-rewards-workstation` (2026-10-30) + `naval-look-noble-sampling` (2026-11-04) are **DEAD (HTTP 000)** — quick-tunnel subdomains die with each cloudflared restart; **re-verify before use, never hard-code as permanent**. |
+| Public URL (CURRENT) | `https://docs-reserve-inside-parking.trycloudflare.com` → `http://localhost:3000` | **LIVE** — re-verified 2026-11-06 (HTTP 200 end-to-end: `/` + `/xt.js` 5,078 B). Prior subdomains `vegas-legacy-fully-presenting` (2026-11-05), `oak-alpha-rewards-workstation` (2026-10-30) + `naval-look-noble-sampling` (2026-11-04) are **DEAD (HTTP 000)** — quick-tunnel subdomains die with each cloudflared restart; **re-verify before use, never hard-code as permanent**. |
 | Tunnel | cloudflared quick tunnel (user-run, no account) | Each restart gives a NEW random subdomain; all hosts in code/docs stay **host-agnostic** (webhook/ingest/xt.js refs use the live URL only as the *current value*). **G10 later swaps this for a stable Vercel domain** — no host is referenced in code, so that swap stays clean |
 
 End-to-end verification through the public URL (2026-10-30):
@@ -84,14 +84,77 @@ This URL is the host for **G3** (paste `xt.js` + `API_BASE`) and the inbound bas
 (the seed clients `cl_fitness`/`cl_iitprep` are gone post-purge; `cl_upcurvv`
 is the only client). All 4 G3 sub-values are now real — no `BHARNA` left.
 
-**Paste-ready snippet for `https://join.upcurvv.com/cll`** (host verified,
-client = `cl_upcurvv`):
+**Paste-ready, PER-CLIENT snippets (G3 prep, 2026-11-06)** — host
+`https://docs-reserve-inside-parking.trycloudflare.com` (re-verified
+2026-11-06: `/` 200 + `/xt.js` 200, 5,078 bytes byte-identical to
+`public/xt.js`). Quick-tunnel subdomains rotate every cloudflared restart
+(`vegas-…`/`oak-…`/`naval-…` all dead = 000; re-verify before every
+paste — G10 swaps for a stable Vercel domain). Every block below is
+byte-identical except `data-client` (and the shared-page note).
+
+| Client | Landing page (PO-supplied) | `data-client` | Paste-ready block |
+|---|---|---|---|
+| `cl_upcurvv` | `https://join.upcurvv.com/cll` | `cl_upcurvv` | block A |
+| `cl_cardgenius-2` | `https://webinar.cardgenius.co.in/wb` | `cl_cardgenius-2` | block B |
+| `cl_fml-new` | `https://jcbwebinar.cracckify.com/` | `cl_fml-new` | block C |
+| `cl_the-job-workshop-ad-account` | `https://join.thejobworkshop.com/webinar` | `cl_the-job-workshop-ad-account` | block D |
+| `cl_abhishek-pal-fml` + `cl_fml-x-abhishek-pal` | **SHARED** `https://join.affluentindianshub.com/vpaxdvju` (PO-confirmed shared) | two clients, ONE page | block E + F (shared-page rule below) |
+| `cl_piyush-ahuja` | **no landing page supplied** (PO to add later) | — | honest "no page yet", not a gap |
 
 ```html
-<!-- CURRENT live host as of 2026-11-05 = vegas-legacy-fully-presenting (re-verify: quick-tunnels rotate every restart; naval-… and oak-… subdomains are dead). G10 swaps this for a stable Vercel domain. -->
-<script src="https://vegas-legacy-fully-presenting.trycloudflare.com/xt.js"
-        data-api="https://vegas-legacy-fully-presenting.trycloudflare.com"
+<!-- A — cl_upcurvv (join.upcurvv.com/cll). CURRENT live host as of 2026-11-06
+     = docs-reserve-inside-parking (re-verify: quick-tunnels rotate every restart).
+     G10 swaps this for the stable Vercel domain. -->
+<script src="https://docs-reserve-inside-parking.trycloudflare.com/xt.js"
+        data-api="https://docs-reserve-inside-parking.trycloudflare.com"
         data-client="cl_upcurvv"
+        defer></script>
+```
+```html
+<!-- B — cl_cardgenius-2 (webinar.cardgenius.co.in/wb) -->
+<script src="https://docs-reserve-inside-parking.trycloudflare.com/xt.js"
+        data-api="https://docs-reserve-inside-parking.trycloudflare.com"
+        data-client="cl_cardgenius-2"
+        defer></script>
+```
+```html
+<!-- C — cl_fml-new (jcbwebinar.cracckify.com) -->
+<script src="https://docs-reserve-inside-parking.trycloudflare.com/xt.js"
+        data-api="https://docs-reserve-inside-parking.trycloudflare.com"
+        data-client="cl_fml-new"
+        defer></script>
+```
+```html
+<!-- D — cl_the-job-workshop-ad-account (join.thejobworkshop.com/webinar) -->
+<script src="https://docs-reserve-inside-parking.trycloudflare.com/xt.js"
+        data-api="https://docs-reserve-inside-parking.trycloudflare.com"
+        data-client="cl_the-job-workshop-ad-account"
+        defer></script>
+```
+
+**Shared-page rule (abhishek): the page `join.affluentindianshub.com/vpaxdvju`
+serves BOTH `cl_abhishek-pal-fml` and `cl_fml-x-abhishek-pal`, but one
+`<script>` carries only ONE `data-client` — so its snippet must NOT silently
+pick one. Two options, PO's call:
+(1) split the page / add a URL discriminator the page can key on, then paste
+the matching block;
+(2) keep one page and add a client hint the page passes (e.g. a
+`?client=` or route segment) — the snippet still takes a single `data-client`,
+so the hint must resolve to exactly one of the two before the tag is
+emitted. Until that's decided, the shared page gets NO block:
+
+```html
+<!-- E — ONLY if the page resolves to cl_abhishek-pal-fml -->
+<script src="https://docs-reserve-inside-parking.trycloudflare.com/xt.js"
+        data-api="https://docs-reserve-inside-parking.trycloudflare.com"
+        data-client="cl_abhishek-pal-fml"
+        defer></script>
+```
+```html
+<!-- F — ONLY if the page resolves to cl_fml-x-abhishek-pal -->
+<script src="https://docs-reserve-inside-parking.trycloudflare.com/xt.js"
+        data-api="https://docs-reserve-inside-parking.trycloudflare.com"
+        data-client="cl_fml-x-abhishek-pal"
         defer></script>
 ```
 
@@ -100,10 +163,10 @@ client = `cl_upcurvv`):
 | G3 sub-item | Status | Evidence |
 |---|---|---|
 | Final `xt.js` build | **DONE** — 4.96 KB (<10 KB), served at `/xt.js` via tunnel; contract fixed (`POST /api/ingest` + top-level `client`), CORS preflight added | `public/xt.js`; commit `6feec32` |
-| Host URL | **DONE (rotates)** — current live subdomain `vegas-legacy-fully-presenting.trycloudflare.com` (re-verified 2026-11-05, HTTP 200); re-verify before every paste — quick-tunnel subdomains die with the process (`oak-…`/`naval-…` already 000) | GET `/` via tunnel 200 |
+| Host URL | **DONE (rotates)** — current live subdomain `docs-reserve-inside-parking.trycloudflare.com` (re-verified 2026-11-06, HTTP 200: `/` + `/xt.js` 5,078 B); re-verify before every paste — quick-tunnel subdomains die with the process (`vegas-…`/`oak-…`/`naval-…` already 000) | GET `/` + `/xt.js` via tunnel 200 |
 | data-client | **RESOLVED** → `cl_upcurvv` (D-01) | `G3_INPUTS.md` |
 | Param-audit | **PASSES by construction** — the PO template's `campaign_id`/`adset_id`/`ad_id` query keys are exactly what xt.js's extractor reads (`xt/src/index.ts` L63–65) | `node scripts/audit-g3-link.mjs "<link>"` |
-| **≥95% ad_id/UTM gate** | **AWAITING LIVE TRAFFIC** (D-03) | 0 leads is a valid state pre G3/G4. The gate is measured ONLY on real `POST /api/ingest` traffic under `cl_upcurvv` once the snippet is pasted — stored-data snapshots no longer count (deleted). Needs ~20+ live clicks to be meaningful; until then status is AWAITING LIVE TRAFFIC, never MET. |
+| **≥95% ad_id/UTM gate** | **AWAITING LIVE TRAFFIC** (D-03 · G3 prep) | Now a **per-client** gate measured by `pnpm g3:measure` across all 7 clients (MET only on ≥20 live clicks, else AWAITING — 0 is a valid state, never MET, never faked). **Current measure (2026-11-06):** cl_upcurvv = 3/3 carry (all 3 are **legacy seed** `meta_form_lead` rows, `adRefId=null` — not live clicks) → `<20` → **AWAITING**; the other 6 clients = 0 clicks → **AWAITING**. EMQ≥7 on Purchase: **no Meta-reported EMQ yet → AWAITING** (not claimed). Re-run after the PO's clicks land. |
 
 **Pass evidence required (D-03):** after pasting the snippet, Meta delivers a
 real click → a touchpoint must land with `client=cl_upcurvv` + `adId` non-null.
@@ -114,8 +177,8 @@ No seed backfill counts.
 | Item | File | Current | Live path | Status | Evidence |
 |---|---|---|---|---|---|
 | Public tunnel for webhooks/ingest | cloudflared quick tunnel | Live, verified end-to-end 2026-10-30 (see "Public tunnel" above) | Stable base for G3 `xt.js` + G4 gateway webhooks; retired at G10 | **LIVE (temporary)** | Public tunnel block |
-| xt.js on landing pages | `xt/` → `public/xt.js` (4.96 KB) | Built + served at `/xt.js` via tunnel; contract-fixed (`/api/ingest` + CORS); **not deployed to any live page** | Pasted on pilot pages (`cl_upcurvv`); ≥95% of leads carry ad_id/UTM — D-03: measured on LIVE traffic only | **AWAITING LIVE TRAFFIC** | G3 |
-| Meta dynamic URL params | — (Ads Manager side) | Unaudited | `{{campaign.id}}/{{adset.id}}/{{ad.id}}` on every ad URL; app audit screen | **MOCK** | G3 |
+| xt.js on landing pages (G3 prep) | `xt/` → `public/xt.js` (5,078 B) | Built + served at `/xt.js` via the re-verified tunnel `docs-reserve-inside-parking` (2026-11-06, `/`+`/xt.js` 200, 5,078 B byte-identical to `public/xt.js`); **not deployed to any live page yet**. **G3 prep: PASTE-READY PER-CLIENT snippets for all 7** (above table) — 5 solo pages + 1 shared page (`affluentindianshub.com/vpaxdvju` = abhishek + fml-x-abhishek, no silent single-client pick — a client hint or page split is the PO's call) + `cl_piyush-ahuja` "no landing page supplied". Measurement via `pnpm g3:measure` (per-client ad_id/UTM carry + EMQ≥7 status). | PO pastes each snippet + drives ~20 real Meta ad clicks; ≥95% of landing-page leads carry ad_id/UTM — D-03: measured on LIVE traffic only | **READY (7-client snippets + audit + measure; AWAITING LIVE TRAFFIC)** | G3 · 2026-11-06 |
+| Meta dynamic URL params (G3 prep) | `scripts/audit-ad-urls.mjs` (read-only) | **Audited 2026-11-06 across ALL 7 stored AdAccount rows** (not just `META_AD_ACCOUNT_IDS`). Result: **UNAUDITABLE** on every account — the G1 pull token can read ad rows but NOT their creative destination links (`creative{object_story_spec}` resolves id-only, 0 readable links of the 3,818 scanned). So neither "≥95% by construction" PASS nor a confirmed "no URLs" can be claimed — PO supplies the ad destination links (or a token with `ads_read` creative-content read) and the audit re-classifies. The fix itself is **Meta-side (Ads Manager)**: this audit only reports WHICH ad ids to change. | `{{campaign.id}}/{{adset.id}}/{{ad.id}}` (or UTM) on every ad URL | **AUDITED (all 7 = UNAUDITABLE on the current token; not a PASS, not a fake "no URLs")** | G3 · `node scripts/audit-ad-urls.mjs` (read-only) |
 | **G4 per-client routing (Razorpay / Cashfree / Cosmofeed / TagMango / FlexiFunnels)** | `api/webhooks/[platform]` + `adapters/payments.ts` + `ingest.ts` | **APP-SIDE DONE 2026-11-03 (D-06):** `POST /api/webhooks/<platform>?client=<id>` reconciled across all **7 clients × 5 G4 platforms = 35/35 accepted** via a locally-replayed, correctly-signed provider event (`scripts/g4-replay.ts`); each platform's `verify` ran against a **per-client `Client.webhookSecret`** (provisioned for all 7; real, not the seed `whsec_*` fakes). Bad signature 502s (rejects), not a fake accept. Fixed a real latent bug the replay exposed: `OutboundEvent.eventId` was the lossy `dedupKey.slice(0,64)` → two CAPI events for one lead across gateways collided on the `@unique` column and 502'd 12/35; now stores the full already-unique `dedupKey` (regression test in `ingest.test.ts`). Dashboard leads-family KPIs flip 0→live on a full-funnel replay. **REAL-PROVIDER HOP still BLOCKED:** no RAZORPAY/CASHFREE/COSMOFEED/TAGMANGO/FLEXIFUNNELS gateway API key in `.env` (only the Meta token + verify token + FX + ingest shared secret exist) — so live gateway traffic isn't exercisable yet; per-client `webhookSecret` is set, ready to point a real gateway at. | Point the 5 real gateways at `POST /api/webhooks/<platform>?client=<id>` on the G10 host; per-client `webhookSecret` already on each Client row | **DONE (app-side) · BLOCKED(real-provider): needs 5 gateway API keys in `.env`** | D-06 · `scripts/g4-replay.ts` (35/35, 7/7 handshake) · 127/127 tests |
 | Aevent / Zoom | `adapters/engagements.ts` | Implemented | Real webhooks + test attendee (register/attend/replay) | **BLOCKED: needs platform configs + test attendee** | G5 |
 | Calendly / Pabbly / WhatsApp | `adapters/engagements.ts` | Implemented | Real webhooks + real booking + WhatsApp round-trip | **BLOCKED: needs accounts + test actions** | G6 |
