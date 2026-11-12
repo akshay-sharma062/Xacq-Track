@@ -40,9 +40,24 @@ export async function GET() {
     orderBy: { role: "asc" },
   });
 
+  // D-14: the acting user's own details for the Topbar "acting as" cluster —
+  // the two fields the `Session` shape doesn't carry: the workspace NAME and
+  // the 2FA state. Read from the user row directly (additive: every existing
+  // field below is unchanged).
+  const acting = s ? await prisma.user.findUnique({ where: { id: s.userId }, select: { twoFactor: true, workspace: { select: { name: true } } } }) : null;
+
   return NextResponse.json({
     session: s
-      ? { email: s.email, name: s.name, role: s.role, maskPhone: s.maskPhone, clientIds: visible }
+      ? {
+          email: s.email,
+          name: s.name,
+          role: s.role,
+          maskPhone: s.maskPhone,
+          clientIds: visible,
+          // D-14 additive fields:
+          workspace: acting?.workspace.name ?? null,
+          twoFactor: acting?.twoFactor ?? false,
+        }
       : null,
     clients,
     adAccounts,

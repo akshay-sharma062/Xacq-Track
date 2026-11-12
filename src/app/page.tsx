@@ -1,8 +1,8 @@
 import { Topbar } from "./components/Topbar";
-import { Stat, BarChart, Meter, Thumbnail, inr, pct, SectionTitle } from "./components/ui";
+import { Stat, BarChart, Meter, Thumbnail, inr, pct, SectionTitle, ist } from "./components/ui";
 import { getSession, resolveClient, qs } from "@/lib/api-utils";
 import { visibleClients } from "@/lib/session";
-import { dashboardAll, SpendRange } from "@/lib/dashboard";
+import { dashboardAll, clientProfile, SpendRange } from "@/lib/dashboard";
 import { prisma } from "@/lib/prisma";
 import Link from "next/link";
 import { AutoRefresh } from "./components/AutoRefresh";
@@ -58,7 +58,25 @@ export default async function Dashboard({
       : undefined;
   const d = await dashboardAll(prisma, clientIds, "last_paid_click", 30, adAccountMeta, rangeParam, customRange);
   const k = d.kpi;
-  const view = isAll ? "All clients" : clientIds.length ? "Client" : "";
+
+  // D-14: the client-profile band — the selected client's real row + its
+  // workspace + funnel/lead counts, read-only. `clientProfile` selects a
+  // WHITELIST of display fields: the client's webhook secret and every D-13
+  // connection/key secret column is structurally excluded, so no secret
+  // value can render. Single-client drill only; the all-clients view gets a
+  // small "N clients" summary line instead (the detailed card is the drill).
+  const profile = !isAll && clientIds.length === 1 ? await clientProfile(prisma, clientIds[0]) : null;
+  const allClientNames = isAll
+    ? (
+        await prisma.client.findMany({
+          where: { id: { in: clientIds } },
+          select: { name: true },
+          orderBy: { name: "asc" },
+        })
+      ).map((c) => c.name)
+    : null;
+
+  const view = isAll ? "All clients" : profile?.name ?? (clientIds.length ? "Client" : "");
   const acctLabel = adAccountMeta ? ` · ${adAccountMeta}` : "";
   const rangeLabel = d.spendRange ? d.spendRange.label : "last 30 days";
 
@@ -79,6 +97,57 @@ export default async function Dashboard({
           <span className="muted">{d.spendRange.dataBasis} — the numbers below are the closest stored data, not a {d.spendRange.label.toLowerCase()} slice.</span>
         </div>
       )}
+
+      {/* D-14: client-profile band. Single-client view = the client's real
+          profile (name/offer/attribution/meta config/funnels/leads/last-changed
+          + workspace) — read-only, secrets excluded at the query. All-clients
+          view = a compact "N clients" summary line (the card is the drill). */}
+      {profile ? (
+        <div className="card mb">
+          <SectionTitle
+            right={
+              <span className="faint" style={{ fontSize: 11 }} title="Client row last-changed (updatedAt)">
+                last changed {ist(profile.updatedAt.toISOString())} IST
+              </span>
+            }
+          >
+            Client profile · <span className="accent">{profile.name}</span>
+          </SectionTitle>
+          <div className="grid cols-4" style={{ fontSize: 13 }}>
+            <span title="Offer price (INR) used for profit math in reports">
+              offer <b className="mono">{inr(profile.offerPrice)}</b>
+            </span>
+            <span title="Attribution default (spec 7)">
+              attribution <b>{profile.attributionModel.replace(/_/g, " ")}</b> · {profile.attributionWindowDays}d
+            </span>
+            <span title="Client timezone">
+              tz <b>{profile.timezone}</b> · {profile.currency}
+            </span>
+            <span title="CAPI event type">
+              capi <b className="mono">{profile.capiEventType ?? "—"}</b>
+            </span>
+            <span title="Meta Page id (config, not a secret)">
+              page <b className="mono">{profile.metaPageId ?? "—"}</b>
+            </span>
+            <span title="Meta CAPI pixel / data-source id (config, not a secret)">
+              pixel <b className="mono">{profile.metaPixelId ?? "—"}</b>
+            </span>
+            <span>
+              funnels <b>{profile.funnelCount}</b> · leads <b>{profile.leadCount}</b>
+            </span>
+            <span className="faint" title="Workspace this client belongs to">
+              ws <b>{profile.workspaceName}</b>
+            </span>
+          </div>
+        </div>
+      ) : isAll ? (
+        <div className="card mb" style={{ fontSize: 12, padding: "10px 12px" }}>
+          <span className="badge accent">{clientIds.length}</span>{" "}
+          <span className="muted">
+            clients in this view: {allClientNames?.join(" · ") ?? "—"} — pick one in the top bar for its profile
+          </span>
+        </div>
+      ) : null}
 
       {/* §2 A: aggregate KPI row (all-currency + INR-normalized; FX-missing shown). */}
       <div className="grid cols-4 mb">

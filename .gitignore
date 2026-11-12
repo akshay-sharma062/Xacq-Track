@@ -90,3 +90,6 @@ pnpm-debug.log*
 
 # D-13a scratch evidence (URL-plumbing run log; distilled findings in DECISIONS D-13a)
 .d13a-*
+
+# D-14 scratch (full-suite log; distilled findings in DECISIONS D-14)
+.d14-*

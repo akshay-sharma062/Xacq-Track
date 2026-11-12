@@ -690,3 +690,71 @@ export async function dashboardAll(
     spendRange: rp ? { range: rp.range, label: rp.label, native: rp.native, dataBasis: rp.dataBasis } : null,
   };
 }
+
+// ---------------------------------------------------------------------------
+// D-14 — the client-profile band (screen 1, single-client view).
+//
+// Reads the Client row + its workspace + two lightweight counts for the
+// compact "Client profile" card. SECURITY GUARDRAIL (spec 10): the field
+// list is a whitelist — `webhookSecret` and every D-13 secret
+// (ApiKey/WebhookEndpoint rows) are NOT selected here, so they can never
+// reach the UI. metaPixelId / metaPageId are config values, not secrets —
+// they are shown (D-14 explicit).
+// ---------------------------------------------------------------------------
+
+export interface ClientProfile {
+  name: string;
+  currency: string;
+  offerPrice: number; // INR
+  attributionWindowDays: number;
+  attributionModel: string;
+  timezone: string;
+  metaPageId: string | null;
+  metaPixelId: string | null;
+  capiEventType: string | null;
+  workspaceName: string;
+  funnelCount: number;
+  leadCount: number;
+  updatedAt: Date;
+}
+
+/** One client's profile band data (D-14). null = no such (visible) client. */
+export async function clientProfile(prisma: PrismaClient, clientId: string): Promise<ClientProfile | null> {
+  const c = await prisma.client.findUnique({
+    where: { id: clientId },
+    select: {
+      name: true,
+      currency: true,
+      offerPrice: true,
+      attributionWindowDays: true,
+      attributionModel: true,
+      timezone: true,
+      metaPageId: true,
+      metaPixelId: true,
+      capiEventType: true,
+      updatedAt: true,
+      workspace: { select: { name: true } },
+    },
+  });
+  if (!c) return null;
+  // The two counts are cheap indexed reads (funnels + leads per client).
+  const [funnelCount, leadCount] = await Promise.all([
+    prisma.funnel.count({ where: { clientId } }),
+    prisma.lead.count({ where: { clientId } }),
+  ]);
+  return {
+    name: c.name,
+    currency: c.currency,
+    offerPrice: c.offerPrice,
+    attributionWindowDays: c.attributionWindowDays,
+    attributionModel: c.attributionModel,
+    timezone: c.timezone,
+    metaPageId: c.metaPageId,
+    metaPixelId: c.metaPixelId,
+    capiEventType: c.capiEventType,
+    workspaceName: c.workspace.name,
+    funnelCount,
+    leadCount,
+    updatedAt: c.updatedAt,
+  };
+}

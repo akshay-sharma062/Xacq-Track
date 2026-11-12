@@ -962,3 +962,66 @@ one-time `x-webhook-secret` into the FlexiFunnels dashboard
 (Form Settings → Webhooks for leads + Products → Set Product Rules →
 Webhook for purchases) + drives ONE real FlexiFunnels order → G4
 FlexiFunnels real-provider proof, then G5/G9.**
+
+## D-14 — client + admin details display (2026-11-12) [normal commit]
+Ticket: PO "client ya admin ki details kahi nahi dikh rahi" — a DISPLAY
+gap, not a bug: the dashboard never read the Client row, and
+`GET /api/session` returned only role+name, so neither the selected
+client's profile nor the acting user's full details rendered anywhere.
+**Display-only → ONE NORMAL commit (no money/CAPI/permission path
+touched).**
+
+**A. Client-profile band (single-client dashboard view):** new
+`clientProfile(prisma, clientId)` in `src/lib/dashboard.ts` (the
+house testable-reader pattern next to `dashboardAll`) reads the
+Client row + workspace + `funnel.count` + `lead.count`;
+`src/app/page.tsx` renders a compact "Client profile · <name>" card
+ABOVE the KPI row when a specific client is selected. Fields shown
+(real columns only): name, currency, offerPrice (INR),
+attributionWindowDays + attributionModel, timezone, metaPageId,
+metaPixelId (config values — shown per the ticket), capiEventType,
+funnel count, lead count, updatedAt ("last changed"), workspace
+name. The all-clients default view shows a small "N clients in this
+view: <names> — pick one in the top bar for its profile" summary
+line instead. **Guardrail:** the reader's `select` is a WHITELIST
+that structurally excludes `Client.webhookSecret` + every D-13 secret
+column (ApiKey/WebhookEndpoint) — no secret value can render, and
+the D-14 tests pin that as a source grep-contract.
+
+**B. Acting-user details (every screen via the Topbar):**
+`GET /api/session` gains two ADDITIVE fields on the acting session —
+`workspace` (the workspace name) + `twoFactor` (read from the user
+row; the `Session` type doesn't carry either) — the existing
+`session`/`clients`/`adAccounts`/`personas`/`roles` payload is
+unchanged. The Topbar's "acting as" cluster now also shows the
+user's **email**, the **workspace name**, and a compact
+**"phones: masked / visible"** PII-state badge (the `maskPhone`
+flag, spec 5.10) — additive, no redesign. **PII guardrail:** a
+phone VALUE is never in the session payload (the User model has no
+phone column; lead phones still flow through `maskPhone()` in
+`leads.ts`); the suite locks the last-4 behaviour for a masked role
+and asserts the Topbar carries only the state flag.
+
+**Verification:** `test/d14.test.ts` **12/12** (profile fields
+from a real row; a row WITH a webhookSecret set proves the reader
+never returns it; unknown client → null; session additive
+`workspace`/`twoFactor` + existing payload intact + no phone value
+in the payload; `maskPhone` last-4 lock-in; source grep contracts:
+no secret column in the reader select / page / Topbar / session
+route) · `pnpm typecheck` 0 · `pnpm build` 0 · full `pnpm test`
+**228/228 (18 files)**. The running prod build on :3000 was
+rebuilt for this feature; the `GET /api/session` live response now
+carries `workspace: "Foremost Leads"` + `twoFactor: true` on the
+acting owner.
+
+**Guardrails:** no `.env`/`dev.db`/`.next`/scratch in the commit
+(`.d14-*` scratch gitignored) · pull rows untouched
+(ad=3818/adSet=1177/spend=3818, G1=cl_upcurvv) · WAL stands ·
+secrets (webhookSecret / apiKey value / webhook-connection secret)
+NEVER rendered — grep-proofed in the D-14 tests · admin PII
+respects the existing `maskPhone` rule · no `next dev` next to prod
+(the D-13a-era `next dev` tree was stopped before the build; only
+prod `next start` :3000 is running).
+
+**Commit:** this D-14 commit on `main` — local, not pushed
+(display-only ticket; the PO pushes per the standing policy).

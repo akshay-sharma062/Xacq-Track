@@ -1034,3 +1034,62 @@ FlexiFunnels dashboard (Form Settings → Webhooks for leads +
 Products → Set Product Rules → Webhook for purchases) + drives ONE
 real FlexiFunnels order → G4 FlexiFunnels real-provider proof (the
 first G4 platform unblocked WITHOUT a gateway API key), then G5/G9.**
+
+## D-14 — client + admin details on the dashboard/Topbar (display gap) (2026-11-12)
+
+**The gap (PO complaint: "client ya admin ki details kahi nahi dikh rahi"):**
+the dashboard never read the `Client` row (screen 1 called only
+`dashboardAll`), and `GET /api/session` returned only
+`role + name + maskPhone + clientIds` — so neither the selected client's
+profile nor the acting user's full details rendered anywhere. A DISPLAY
+gap, not a bug: two read-only additions.
+
+**A. Client-profile band (single-client dashboard view).** New
+`clientProfile(prisma, clientId)` in `src/lib/dashboard.ts` (the
+house testable-lib-reader pattern, next to `dashboardAll`): reads the
+Client row + its workspace + `funnel.count` + `lead.count`, and
+`page.tsx` renders a compact "Client profile · <name>" card ABOVE the
+KPI row when a SPECIFIC client is selected (`sp.client` set + not
+"all"). In the all-clients default view a small "N clients in this
+view: … — pick one in the top bar for its profile" summary line shows
+instead. Shown fields (only real columns): **name, currency,
+offerPrice (INR), attributionWindowDays + attributionModel, timezone,
+metaPageId, metaPixelId, capiEventType, funnel count, lead count,
+updatedAt ("last changed"), workspace name**. `metaPixelId`/
+`metaPageId` are config values (shown, per the ticket); **no secret
+value is ever rendered** — the reader's `select` is a WHITELIST that
+structurally excludes `Client.webhookSecret` and every D-13 secret
+(`ApiKey`/`WebhookEndpoint` columns), so a secret cannot reach the UI
+by construction (the D-14 test suite pins this as a grep contract on
+the source).
+
+**B. Acting-user details (every screen, via the Topbar).**
+`GET /api/session` gains two ADDITIVE fields on the acting session:
+`workspace` (the workspace NAME) + `twoFactor`, read from the user
+row (the `Session` shape doesn't carry either); the Topbar's
+"acting as" cluster now also shows the user's **email**, the
+**workspace name**, and the **phone-mask STATE** as a compact
+"phones: masked / visible" badge (spec 5.10 hint) — additive to the
+existing role badge + name + persona dropdown, no redesign. PII
+guardrail: the session payload carries only the `maskPhone` STATE
+flag — a phone VALUE is never in it (the User model has no phone
+column; lead phones still flow through `maskPhone()` in `leads.ts`),
+and the D-14 suite locks the last-4 masking behaviour for a masked
+role + asserts no phone/secret value in the Topbar.
+
+**Guardrails honoured:** display-only (reads + renders real
+DB/config fields; no money/CAPI/permission path touched — hence a
+NORMAL commit, not [REVIEW]). `.env`/`dev.db`/`.next`/scratch not in
+the commit; pull rows untouched (fixed point ad=3818/adSet=1177/
+spend=3818, G1=cl_upcurvv); WAL stands; one DB writer.
+
+**Verification:** `test/d14.test.ts` 12/12 — the client-profile
+band data (real row fields incl. funnel/lead counts + workspace
+name; the row WITH a webhookSecret set proves the reader NEVER
+returns it; unknown client → null), the session route (new
+`workspace`/`twoFactor` additive; existing `session`/`clients`/
+`adAccounts`/`personas`/`roles` intact; no phone value in the
+payload), the maskPhone last-4 lock-in for a masked role, and the
+source grep contracts (no secret column in the reader select /
+page / Topbar / session route). `pnpm typecheck` 0 · `pnpm build` 0
+· full `pnpm test` green.

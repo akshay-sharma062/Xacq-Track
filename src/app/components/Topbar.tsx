@@ -8,6 +8,13 @@ interface Persona {
   name: string;
   role: string;
   phoneMask: boolean;
+  // D-14 additive acting-user details (from GET /api/session): the acting
+  // user's workspace + 2FA + phone-mask STATE. `maskPhone` is the session
+  // field (true = this role sees phones masked to last-4, spec 5.10). No
+  // full phone value is carried here — only the mask-state flag.
+  workspace?: string | null;
+  twoFactor?: boolean;
+  maskPhone?: boolean;
 }
 
 // D-01: the ad-account filter options come straight from the AdAccount link
@@ -116,6 +123,21 @@ function TopbarInner({ title, crumb }: { title: string; crumb?: string }) {
           <span className="muted" style={{ fontSize: 12 }}>
             {me?.name}
           </span>
+          {/* D-14: acting-user details — email + workspace + phone-mask STATE
+              (compact, additive to the existing role/name/dropdown cluster).
+              Only the mask flag is shown here — a full phone value is NEVER
+              part of the session payload (spec 5.10). */}
+          {me?.email ? <span className="mono muted" style={{ fontSize: 11 }} title="Acting user email">{me.email}</span> : null}
+          {me?.workspace ? <span className="faint" style={{ fontSize: 11 }} title="Workspace">· {me.workspace}</span> : null}
+          {me ? (
+            <span
+              className={`badge ${me.maskPhone ? "warn" : "good"}`}
+              style={{ fontSize: 10 }}
+              title="Phone PII state (spec 5.10): masked = this role sees only the last-4 of phones"
+            >
+              phones: {me.maskPhone ? "masked" : "visible"}
+            </span>
+          ) : null}
           <select
             value={me?.email ?? ""}
             onChange={(e) => switchPersona(e.target.value)}
