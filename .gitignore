@@ -87,3 +87,6 @@ pnpm-debug.log*
 
 # D-13 scratch evidence (additive-migration proof; distilled findings in DECISIONS D-13)
 .d13-*
+
+# D-13a scratch evidence (URL-plumbing run log; distilled findings in DECISIONS D-13a)
+.d13a-*

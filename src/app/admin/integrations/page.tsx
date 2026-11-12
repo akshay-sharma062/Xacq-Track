@@ -3,6 +3,7 @@ import { getSession } from "@/lib/api-utils";
 import { can } from "@/lib/session";
 import { adapterCatalog } from "@/lib/adapters";
 import { prisma } from "@/lib/prisma";
+import { resolveWebhookBase, isLoopbackBase, WebhookBaseSource } from "@/lib/integrations";
 import { IntegrationsPanel } from "./IntegrationsPanel";
 
 /**
@@ -56,12 +57,23 @@ export default async function AdminIntegrationsPage() {
     orderBy: { name: "asc" },
   });
 
+  // D-13a: the base newly-generated connections will use. The server
+  // component knows the .env value the browser can't see — resolve it here
+  // (PUBLIC_BASE_URL > NEXT_PUBLIC_BASE_URL > localhost-dev) and hand it to
+  // the panel, which banners the loopback case so a future PO doesn't
+  // re-run the "FlexiFunnels rejects localhost" bug.
+  const webhookBase = resolveWebhookBase();
+  const baseIsLoopback = isLoopbackBase(webhookBase.base);
+
   return (
     <>
       <Topbar title="Webhooks & API keys" crumb="D-13 · multiple connections per client×platform" />
       <IntegrationsPanel
         platforms={platforms}
         clients={clients.map((c) => ({ id: c.id, name: c.name }))}
+        base={webhookBase.base}
+        baseSource={webhookBase.source}
+        baseIsLoopback={baseIsLoopback}
       />
     </>
   );

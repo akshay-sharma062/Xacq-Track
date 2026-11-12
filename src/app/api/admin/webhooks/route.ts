@@ -64,9 +64,10 @@ export async function POST(req: NextRequest) {
       platform,
       label,
       createdBy: s.userId,
-      // The base URL the inboundUrl is built from: the app's public base if
-      // configured, else localhost (dev). The PO swaps to the Vercel domain at G10.
-      baseUrl: process.env.NEXT_PUBLIC_BASE_URL || undefined,
+      // D-13a: no explicit baseUrl here — the base follows the env
+      // precedence PUBLIC_BASE_URL > NEXT_PUBLIC_BASE_URL > localhost-dev
+      // (resolveWebhookBase). An explicit baseUrl is a test/caller override
+      // only; passing NEXT_PUBLIC_BASE_URL here would shadow PUBLIC_BASE_URL.
     });
   } catch (e: any) {
     // The (clientId, platform, label) unique constraint: duplicate label.

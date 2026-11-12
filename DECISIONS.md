@@ -947,3 +947,90 @@ copies the inboundUrl + `x-webhook-secret` into the FlexiFunnels
 dashboard (the quick-action card's two paste targets) + drives ONE real
 FlexiFunnels order → G4 FlexiFunnels real-provider proof
 (the first G4 platform unblocked WITHOUT a gateway API key), then G5/G9.**
+
+## D-13a — webhook inboundUrl → PUBLIC host (FlexiFunnels rejects localhost) (2026-11-12)
+
+**The bug (the root cause D-13's handoff exposed in practice):**
+`createWebhookEndpoint` built the inboundUrl from
+`NEXT_PUBLIC_BASE_URL ?? "http://localhost:3000"`, and `.env` had no
+base-URL key at all — so every FlexiFunnels connection the PO created
+in `/admin/integrations` carried a `http://localhost:3000/...` URL.
+An external provider (FlexiFunnels in particular) cannot reach that
+host and rejects the URL as "incorrect." No event can ever land.
+
+**Fix (small: one lib file + .env + one refresh script + UI banner):**
+
+1. **New `.env` key `PUBLIC_BASE_URL`** (documented in `.env.example`,
+   empty placeholder committed; the live value stays local — the
+   quick-tunnel subdomain rotates on every cloudflared restart, so the
+   PO sets it from a re-verified host, never a guessed one). It is
+   DISTINCT from `NEXT_PUBLIC_BASE_URL` (the browser's client-side
+   base): `PUBLIC_BASE_URL` is what EXTERNAL webhooks POST to.
+2. **`resolveWebhookBase` (src/lib/integrations.ts)** — the new base
+   resolution with an explicit precedence:
+   `explicit arg (tests) > PUBLIC_BASE_URL > NEXT_PUBLIC_BASE_URL >
+   "http://localhost:3000" (dev fallback)`. Trailing slashes are
+   trimmed; blank values skip their tier. `createWebhookEndpoint` now
+   uses it (the admin route no longer passes `NEXT_PUBLIC_BASE_URL`
+   explicitly — that would have shadowed the PUBLIC tier).
+3. **`isLoopbackBase`** — flags `localhost` / `127.0.0.1` / `0.0.0.0`
+   / `::1` hosts (the exact unreachable case).
+4. **`refreshWebhookInboundUrls` + `pnpm webhooks:refresh-url`
+   (scripts/refresh-webhook-urls.ts)** — one-off re-point of the
+   EXISTING rows: rewrites ONLY `inboundUrl` on every **active**
+   `WebhookEndpoint` row (a revoked row is dead — its old URL is audit
+   trail; the PO re-mints a connection instead). Idempotent by
+   construction (a second run reports 0 changes). NEVER touches
+   `endpointSecret` / `keyHash` / the connection log — the refresh
+   writes exactly one column. The legacy G4 routes (no `&conn=`,
+   `Client.webhookSecret`) are structurally unaffected: they don't
+   read `WebhookEndpoint` at all.
+5. **UI banner (IntegrationsPanel):** when the resolved base is a
+   loopback host (i.e. `PUBLIC_BASE_URL` unset/blank), the panel
+   shows a warning card — "Public base URL not set — generated
+   webhooks will be unreachable by external providers. Set
+   PUBLIC_BASE_URL in .env and re-generate this connection" — so a
+   future PO can't silently re-run the same bug. A "base: …" badge
+   next to the Webhooks header shows which tier is in effect.
+
+**Secrets/verify untouched:** the change is pure URL plumbing — the
+`create`/`verify`/`revoke`/`resolveEndpointForRoute` code paths are
+unchanged (the fix only alters the base used to BURN THE URL STRING
+at creation/refresh; per D-13 the secret is reversible-stored and the
+verify is header-echo / HMAC, both independent of the URL). No money /
+CAPI / permission path touched → **a normal commit, not [REVIEW]**
+(per the ticket's escalation rule).
+
+**Verification:** `test/d13a.test.ts` **21/21** — base precedence
+(explicit > PUBLIC > NEXT_PUBLIC > localhost-dev; blank-skip),
+`isLoopbackBase` (all loopback variants + a real host),
+"generated FlexiFunnels inboundUrl contains NO 'localhost'/'127.0.0.1'
+once PUBLIC_BASE_URL is set" (real DB write + read-back, including the
+precedence case where a loopback `NEXT_PUBLIC_BASE_URL` must not
+shadow `PUBLIC_BASE_URL`), refresh idempotency (run 1 = N updated,
+run 2 = 0 updated / N unchanged), refresh-secret-untouched (the
+endpointSecret + connection log are byte-identical before/after),
+refresh-active-only (a revoked row keeps its URL), legacy G4 path
+unchanged (route contract asserts: the `client.webhookSecret`
+fallback, the optional `conn` param, the schema's `Client.webhookSecret`
+column, and the refresh CLI performing no direct DB/secret writes).
+`pnpm typecheck` 0 · `pnpm build` exit 0 · full `pnpm test`
+**216/216 (17 files)** · prod `next start` restarted on the new
+build · no `next dev` started by this ticket · fixed point
+ad=3818/adSet=1177/spend=3818 + WAL re-verified after the refresh ·
+`.env`/`dev.db`/`.next`/scratch NOT in the commit (`.d13a-*`
+gitignored; only `.env.example` + `.gitignore` patterns are committed).
+**Refresh run 1 on the live dev.db: 6 updated / 0 unchanged;
+re-run: 0 updated / 6 unchanged** (idempotency proof; all 6 active
+FlexiFunnels rows now point at the live tunnel host).
+
+**NEXT_G10 note:** when the app moves to a stable Vercel domain,
+`PUBLIC_BASE_URL` is the one env value to update (and
+`pnpm webhooks:refresh-url` re-points the existing rows in one
+command; secrets/conns unchanged).
+
+**Next gate = PO pastes the NEW public inboundUrl into the
+FlexiFunnels dashboard (Form Settings → Webhooks for leads +
+Products → Set Product Rules → Webhook for purchases) + drives ONE
+real FlexiFunnels order → G4 FlexiFunnels real-provider proof (the
+first G4 platform unblocked WITHOUT a gateway API key), then G5/G9.**

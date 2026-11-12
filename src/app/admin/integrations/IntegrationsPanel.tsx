@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { WebhookBaseSource } from "@/lib/integrations";
 
 /**
  * D-13 — the integrations admin panel (client component). Talks to the
@@ -61,6 +62,7 @@ interface ConnLogRow {
   error: string | null;
   payloadHash: string;
 }
+
 
 const PURPOSES = [
   { value: "ingest", label: "ingest" },
@@ -128,9 +130,18 @@ function ShowOnce({ value, kind }: { value: string; kind: "key" | "webhook" }) {
 export function IntegrationsPanel({
   platforms,
   clients,
+  base,
+  baseSource,
+  baseIsLoopback,
 }: {
   platforms: PlatformOpt[];
   clients: ClientOpt[];
+  /** D-13a: the base URL NEW connections will be generated against. */
+  base: string;
+  /** Which tier supplied `base` (explicit / PUBLIC_BASE_URL / NEXT_PUBLIC_BASE_URL / localhost-dev). */
+  baseSource: WebhookBaseSource;
+  /** True when `base` is a loopback host external providers can't reach. */
+  baseIsLoopback: boolean;
 }) {
   const [keys, setKeys] = useState<KeyRow[] | null>(null);
   const [webhooks, setWebhooks] = useState<WebhookRow[] | null>(null);
@@ -256,9 +267,37 @@ export function IntegrationsPanel({
   // value can't be re-read — by design).
   const ffHooks = (webhooks ?? []).filter((w) => w.platform === "flexifunnels");
 
+  // D-13a: the current-generation base + which tier it came from. Shown in
+  // the Webhook-connections header, and BANNERED when it's a loopback host
+  // (localhost / 127.0.0.1) — the exact "FlexiFunnels rejects localhost" case.
+  const SOURCE_LABEL: Record<WebhookBaseSource, string> = {
+    explicit: "injected",
+    PUBLIC_BASE_URL: "PUBLIC_BASE_URL",
+    NEXT_PUBLIC_BASE_URL: "NEXT_PUBLIC_BASE_URL",
+    "localhost-dev": "localhost fallback (no PUBLIC_BASE_URL in .env)",
+  };
+
   return (
     <div className="stack" style={{ gap: 16 }}>
       {err ? <div className="card"><span className="bad" style={{ fontSize: 12 }}>{err}</span></div> : null}
+
+      {baseIsLoopback ? (
+        <div className="card" style={{ borderColor: "rgba(245,184,61,0.5)", background: "rgba(245,184,61,0.06)" }}>
+          <div className="row spread">
+            <div>
+              <h3 style={{ margin: 0 }} className="warn">Public base URL not set</h3>
+              <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+                Generated webhook connections will use <code className="mono">{base}</code> — a host an
+                external provider (FlexiFunnels, Razorpay, …) cannot reach, so they will reject the
+                URL as "incorrect". Set <code className="mono">PUBLIC_BASE_URL</code> in <code>.env</code> to
+                the live tunnel subdomain, re-generate the connection (or run{" "}
+                <code className="mono">pnpm webhooks:refresh-url</code> to re-point the existing rows),
+                and re-verify the subdomain — quick-tunnels rotate on every restart.
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {/* ---------------------------- API KEYS ---------------------------- */}
       <div className="card">
@@ -339,9 +378,18 @@ export function IntegrationsPanel({
 
       {/* ------------------------- WEBHOOK CONNECTIONS --------------------- */}
       <div className="card">
-        <div className="row spread" style={{ marginBottom: 10 }}>
+        <div className="row spread" style={{ marginBottom: 6 }}>
           <h3 style={{ margin: 0 }}>Webhook connections</h3>
           <span className="faint" style={{ fontSize: 11 }}>per-connection secret · inboundUrl carries &amp;conn=</span>
+        </div>
+        <div className="row spread" style={{ marginBottom: 10 }}>
+          <span className="faint" style={{ fontSize: 11 }}>
+            new connections generated against{" "}
+            <code className="mono" style={{ fontSize: 11, wordBreak: "break-all" }}>{base}</code>
+          </span>
+          <span className={`badge ${baseIsLoopback ? "warn" : "good"}`} style={{ fontSize: 11 }}>
+            base: {SOURCE_LABEL[baseSource]}{baseIsLoopback ? " (unreachable externally)" : ""}
+          </span>
         </div>
 
         <div className="row" style={{ marginBottom: 12, flexWrap: "wrap" }}>

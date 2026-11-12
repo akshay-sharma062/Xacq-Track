@@ -126,21 +126,80 @@ export interface CreateEndpointArgs {
   platform: SourcePlatform;
   label: string;
   createdBy: string;
-  /** Base URL the inboundUrl is built from (default the app's base). */
+  /**
+   * Explicit base injection (tests / callers). When omitted, D-13a's
+   * PUBLIC_BASE_URL precedence applies (resolveWebhookBase).
+   */
   baseUrl?: string;
+}
+
+// ---------------------------------------------------------------------------
+// D-13a — base-URL precedence for webhook inboundUrls.
+//
+// The bug this fixes: inboundUrl defaulted to "http://localhost:3000"
+// whenever no base was configured — and .env had none — so every generated
+// FlexiFunnels/Razorpay connection pointed at a host an EXTERNAL provider
+// cannot reach (FlexiFunnels rejects localhost outright). The public base is
+// its OWN key, PUBLIC_BASE_URL (the live tunnel host external webhooks hit),
+// DISTINCT from the client-side NEXT_PUBLIC_BASE_URL (the browser's base).
+// Precedence: explicit arg (tests) > PUBLIC_BASE_URL > NEXT_PUBLIC_BASE_URL
+// > the localhost dev fallback.
+// ---------------------------------------------------------------------------
+
+export type WebhookBaseSource = "explicit" | "PUBLIC_BASE_URL" | "NEXT_PUBLIC_BASE_URL" | "localhost-dev";
+
+/** The base + which tier supplied it (so the UI can honestly flag the
+ *  localhost fallback as "unreachable by external providers"). */
+/**
+ * Resolve the base URL a webhook inboundUrl is built from (D-13a precedence).
+ * `env` is the env view (tests pass a partial; the default is the live
+ * process.env). Typed as Record<string, string | undefined> so BOTH process.env
+ * and a test partial literal are assignable (a weak all-optional type would
+ * reject process.env with TS2559).
+ */
+export function resolveWebhookBase(
+  explicit?: string,
+  env: Record<string, string | undefined> = process.env
+): { base: string; source: WebhookBaseSource } {
+  const clean = (v: string | undefined) => (v && v.trim() ? v.trim().replace(/\/+$/, "") : null);
+  const e1 = clean(explicit);
+  if (e1) return { base: e1, source: "explicit" };
+  const e2 = clean(env.PUBLIC_BASE_URL);
+  if (e2) return { base: e2, source: "PUBLIC_BASE_URL" };
+  const e3 = clean(env.NEXT_PUBLIC_BASE_URL);
+  if (e3) return { base: e3, source: "NEXT_PUBLIC_BASE_URL" };
+  return { base: "http://localhost:3000", source: "localhost-dev" };
+}
+
+/**
+ * True when a base URL is a loopback host an EXTERNAL provider can never
+ * reach — the exact D-13a failure mode. Drives the UI warning banner; the
+ * refresh script logs it (and still rewrites — a loopback source means
+ * PUBLIC_BASE_URL is simply unset yet).
+ */
+export function isLoopbackBase(url: string): boolean {
+  try {
+    // URL.hostname keeps IPv6 brackets ("[::1]") — strip them before the
+    // comparison so http://[::1]:3000 is caught too.
+    const host = new URL(url).hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    return host === "localhost" || host === "127.0.0.1" || host === "0.0.0.0" || host === "::1";
+  } catch {
+    return false; // an unparseable value is a different (bannered-by-source) case
+  }
 }
 
 /**
  * Create a WebhookEndpoint (a webhook CONNECTION): a fresh random secret
  * (reversible-stored), and the exact inboundUrl the PO pastes into the
  * provider dashboard (…&conn=<this id>). Returns the plain secret ONCE.
+ * The base follows D-13a's PUBLIC_BASE_URL precedence (resolveWebhookBase).
  */
 export async function createWebhookEndpoint(prisma: PrismaClient, args: CreateEndpointArgs) {
   if (!isPlatform(args.platform)) {
     throw new Error(`unknown platform '${String(args.platform)}'`);
   }
   const secret = generateWebhookSecret();
-  const base = (args.baseUrl ?? process.env.NEXT_PUBLIC_BASE_URL ?? "http://localhost:3000").replace(/\/$/, "");
+  const { base } = resolveWebhookBase(args.baseUrl);
   const row = await prisma.webhookEndpoint.create({
     data: {
       clientId: args.clientId,
@@ -163,6 +222,76 @@ export async function revokeWebhookEndpoint(prisma: PrismaClient, id: string): P
   if (!ep || !ep.active) return { revoked: false };
   await prisma.webhookEndpoint.update({ where: { id }, data: { active: false } });
   return { revoked: true };
+}
+
+// ---------------------------------------------------------------------------
+// D-13a — one-off refresh of EXISTING connections' inboundUrl.
+//
+// Connections created before PUBLIC_BASE_URL existed (or while it was unset)
+// carry a localhost inboundUrl in the DB — external providers reject that.
+// This rewrites ONLY the inboundUrl string on every ACTIVE row (revoked
+// connections are dead — their past URL is part of the audit trail; the PO
+// mints a fresh connection for any re-pointing need), leaving
+// endpointSecret / keyHash / the connection log entirely untouched.
+// Idempotent: a second run finds every URL already correct → 0 changes.
+// ---------------------------------------------------------------------------
+
+export interface WebhookInboundUrl {
+  /** `<base>/api/webhooks/<platform>?client=<clientId>&conn=<id>`. */
+  url: string;
+  source: WebhookBaseSource;
+}
+
+/** Rebuild one connection's inboundUrl against a base (+tier). */
+export function buildInboundUrl(
+  ep: { id: string; platform: string; clientId: string },
+  base: string,
+  source: WebhookBaseSource
+): WebhookInboundUrl {
+  return { url: `${base}/api/webhooks/${ep.platform}?client=${ep.clientId}&conn=${ep.id}`, source };
+}
+
+export interface RefreshWebhookUrlsResult {
+  base: string;
+  source: WebhookBaseSource;
+  /** loopback base — external providers can't reach it; the UI banners it. */
+  baseIsLoopback: boolean;
+  /** every ACTIVE row touched; `changed=false` = already current. */
+  rows: { id: string; label: string; platform: string; active: boolean; changed: boolean; before: string; after: string }[];
+  updated: number; // changed=true count
+  unchanged: number; // changed=false count
+}
+
+export async function refreshWebhookInboundUrls(
+  prisma: PrismaClient,
+  opts: { explicitBase?: string } = {}
+): Promise<RefreshWebhookUrlsResult> {
+  const { base, source } = resolveWebhookBase(opts.explicitBase);
+  // ACTIVE rows only (the ticket's scope): a revoked connection is dead — its
+  // stored URL is audit trail, and re-pointing it would hide the fact it was
+  // revoked while localhost-based. A PO re-mints a connection instead.
+  const rows = await prisma.webhookEndpoint.findMany({
+    where: { active: true },
+    select: { id: true, clientId: true, platform: true, label: true, active: true, inboundUrl: true },
+    orderBy: { createdAt: "asc" },
+  });
+  let updated = 0;
+  let unchanged = 0;
+  const out: RefreshWebhookUrlsResult["rows"] = [];
+  for (const ep of rows) {
+    const next = buildInboundUrl(ep, base, source);
+    const changed = ep.inboundUrl !== next.url;
+    if (changed) {
+      // ONLY the URL string is written — the secret, hash and log are never
+      // read or touched here (the ticket's hard constraint).
+      await prisma.webhookEndpoint.update({ where: { id: ep.id }, data: { inboundUrl: next.url } });
+      updated++;
+    } else {
+      unchanged++;
+    }
+    out.push({ id: ep.id, label: ep.label, platform: ep.platform, active: ep.active, changed, before: ep.inboundUrl, after: next.url });
+  }
+  return { base, source, baseIsLoopback: isLoopbackBase(base), rows: out, updated, unchanged };
 }
 
 /**

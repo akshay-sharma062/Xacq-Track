@@ -894,3 +894,71 @@ inboundUrl + secret into the FlexiFunnels dashboard (the quick-action
 card's two targets) + drives ONE real FlexiFunnels order → G4
 FlexiFunnels real-provider proof (the first G4 platform unblocked
 WITHOUT a gateway API key), then G5/G9.**
+
+## D-13a — webhook inboundUrl → PUBLIC host (FlexiFunnels rejects localhost) (2026-11-12) [normal commit]
+Ticket: the FlexiFunnels connections created under D-13 all carried
+`http://localhost:3000/...` inboundUrls (`.env` had no base-URL key),
+which an external provider can never reach — FlexiFunnels rejects the
+URL as "incorrect". **URL-plumbing fix only — no money/CAPI/permission
+path touched → ONE NORMAL commit (the ticket's escalation rule: it
+would have been [REVIEW] only if the integrations.ts change had
+reached auth/verify logic; it didn't — only the base-URL line
+changed).**
+
+**What landed:** new `.env` key `PUBLIC_BASE_URL` (distinct from the
+client-side `NEXT_PUBLIC_BASE_URL`; value = the live trycloudflare
+subdomain, set locally, not committed — committed are the key in
+`.env.example` + the `.gitignore` scratch pattern) · `resolveWebhookBase`
+precedence `explicit(test) > PUBLIC_BASE_URL > NEXT_PUBLIC_BASE_URL >
+localhost-dev` in `src/lib/integrations.ts` (the admin route stopped
+passing `NEXT_PUBLIC_BASE_URL` explicitly, which would have shadowed
+the PUBLIC tier) · `isLoopbackBase` (localhost/127.0.0.1/0.0.0.0/::1)
+· `refreshWebhookInboundUrls` — active-rows-only rewrite of the
+inboundUrl STRING (a revoked row keeps its URL = audit trail),
+secret/hash/log untouched, idempotent · `scripts/refresh-webhook-urls.ts`
+(`pnpm webhooks:refresh-url`, gitignored evidence log) · UI warning
+banner in `/admin/integrations` when the resolved base is loopback +
+a "base: …" tier badge.
+
+**Live run (dev.db):** 6 active FlexiFunnels rows re-pointed from
+`http://localhost:3000` to the current tunnel
+`https://tourist-filtering-sheriff-firmware.trycloudflare.com`
+(re-verified live: `/` + `/admin/integrations` + `/api/admin/keys`
+200 through it; bogus `&conn=` still 404s). Refresh run 1 =
+`updated=6 unchanged=0`; re-run = `updated=0 unchanged=6`
+(idempotency proof). `PUBLIC_BASE_URL` is set in `.env` to that host.
+
+**Tests + guardrails:** `test/d13a.test.ts` 21/21 (precedence,
+loopback detection, "no localhost in generated URL once
+PUBLIC_BASE_URL is set" via a real DB write+read-back incl. the
+loopback-NEXT_PUBLIC-shadowing case, refresh idempotency,
+refresh-secret-untouched, refresh-active-only, legacy G4 route/schema
+contract asserts) · full suite **216/216 (17 files)** · `typecheck`
+0 · `build` 0 · prod `next start` restarted on the new build · no
+`next dev` started by this ticket · fixed point ad=3818/adSet=1177/
+spend=3818 + WAL intact (re-verified post-refresh) · `.env`/`dev.db`/
+`.next`/scratch NOT in the commit (`.d13a-*` gitignored).
+
+**D-13's two caveats are now RESOLVED by this ticket:** (1) the
+"quick-tunnel host rotated dead" caveat — this session re-verified a
+fresh host (`tourist-filtering-sheriff-firmware`, 2026-11-12) and
+wired it as `PUBLIC_BASE_URL`; the host still rotates on every
+cloudflared restart, so re-verify before the PO paste (G10 swaps to
+the Vercel domain + one `pnpm webhooks:refresh-url` re-point).
+(2) the "next dev on :3001 next to prod" caveat — at this session's
+start no dev/prod instance was running on :3000/:3001; this ticket
+started only prod (`next start` :3000) + the cloudflared tunnel
+(user-run, as before), no `next dev`.
+
+**[Normal] commit:** this D-13a commit on `main` (17-ish files:
+`integrations.ts` + admin route + page/panel + `.env.example` +
+`.gitignore` + `package.json` script alias + `scripts/refresh-webhook-urls.ts`
++ `test/d13a.test.ts` + the 3 doc files) — local only, PO pushes.
+
+**Next gate = PO pastes the NEW public inboundUrl (now
+`https://<current-tunnel>/api/webhooks/flexifunnels?client=<id>&conn=<id>`,
+all 6 already re-pointed — re-verify the subdomain first) + the
+one-time `x-webhook-secret` into the FlexiFunnels dashboard
+(Form Settings → Webhooks for leads + Products → Set Product Rules →
+Webhook for purchases) + drives ONE real FlexiFunnels order → G4
+FlexiFunnels real-provider proof, then G5/G9.**
