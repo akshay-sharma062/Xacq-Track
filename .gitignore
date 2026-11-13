@@ -93,3 +93,6 @@ pnpm-debug.log*
 
 # D-14 scratch (full-suite log; distilled findings in DECISIONS D-14)
 .d14-*
+
+# D-15 scratch evidence (live refresh before/after + idempotency; distilled findings in DECISIONS D-15)
+.d15-*

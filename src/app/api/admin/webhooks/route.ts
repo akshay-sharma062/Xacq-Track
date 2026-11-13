@@ -14,7 +14,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { gate, resolveClientSet } from "@/lib/api-utils";
-import { createWebhookEndpoint, isPlatform } from "@/lib/integrations";
+import { createWebhookEndpoint, isPlatform, currentWebhookHost, urlHost } from "@/lib/integrations";
 import { auditAction } from "@/lib/security";
 
 export async function GET(req: NextRequest) {
@@ -36,7 +36,31 @@ export async function GET(req: NextRequest) {
     select: { id: true, clientId: true, platform: true, label: true, inboundUrl: true, active: true, createdAt: true, lastReceivedAt: true },
     orderBy: { createdAt: "asc" },
   });
-  return NextResponse.json({ clientSet, webhooks: rows });
+
+  // D-15: the "current live host" the stored URLs should point at (the
+  // PO-persisted Workspace.liveHost, else the .env base). Each row's stored
+  // host is compared to it so the panel can badge a DEAD-subdomain URL
+  // ("URL is stale: host X ≠ current Y") WITHOUT auto-refreshing — the PO
+  // clicks "Refresh URLs" to re-point (a rotation is a PO event, not a
+  // background write). The currentBase is NEVER a loopback-less fake: it's
+  // exactly what currentWebhookHost resolves.
+  const current = await currentWebhookHost(prisma, s.workspaceId);
+  const currentHost = urlHost(current.base);
+  const webhooks = rows.map((r) => {
+    const storedHost = urlHost(r.inboundUrl);
+    const stale = Boolean(currentHost && storedHost && storedHost !== currentHost && r.active);
+    return { ...r, stale, storedHost, staleHost: stale ? storedHost : undefined };
+  });
+
+  return NextResponse.json({
+    clientSet,
+    webhooks,
+    // D-15: the known-source current host + which source supplied it (the
+    // panel auto-suggests the "current live host" input from this).
+    currentBase: current.base,
+    currentHost: currentHost ?? null,
+    currentBaseSource: current.source,
+  });
 }
 
 export async function POST(req: NextRequest) {

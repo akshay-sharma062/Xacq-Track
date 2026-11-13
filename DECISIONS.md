@@ -1093,3 +1093,138 @@ payload), the maskPhone last-4 lock-in for a masked role, and the
 source grep contracts (no secret column in the reader select /
 page / Topbar / session route). `pnpm typecheck` 0 · `pnpm build` 0
 · full `pnpm test` green.
+
+## D-15 — webhook URL host-staleness self-healing + hard delete (2026-11-12)
+
+**The problem (D-13a exposed it, then the tunnel rotated under us):**
+a quick-tunnel subdomain (the `PUBLIC_BASE_URL` D-13a re-pointed to)
+ROTATES on every cloudflared restart, so a stored
+`WebhookEndpoint.inboundUrl` can point at a DEAD subdomain while the
+path (`?client=…&conn=…`), the per-connection secret, and the platform
+are all still valid — the provider rejects it as "unreachable /
+incorrect" and every FlexiFunnels event stops landing. The fix must
+re-point the URL on the next rotation WITHOUT re-minting the
+connection (re-minting burns a new secret the provider would have to
+be re-pasted for — the D-13 "shown once" makes that the worst
+out-of-band path). Plus the PO request: "revoke karne par delete hi
+ho jaye" — a connection's revoke should be a real DELETE.
+
+**Fix (two tasks, three layers):**
+
+**Task 1 — host-aware inboundUrl (the staleness self-heal).**
+1. **Pure helpers in `src/lib/webhookUrl.ts`** (no `node:crypto`, no
+   Prisma — kept in its own module so the CLIENT panel can import it
+   without dragging `node:` into the browser bundle; a value-import
+   from `integrations.ts` broke `pnpm build` with
+   `UnhandledSchemeError: Reading from "node:crypto"`, which is what
+   the split fixes): `urlHost(u)` (origin host, null if unparseable)
+   + `rehostInboundUrl(stored, newBase)` (rewrites ONLY host+scheme,
+   preserving the path `?client=…&conn=…` byte-for-byte; idempotent;
+   null on an unparseable input so a caller never silently mangles a
+   URL). `integrations.ts` re-exports them — server routes + tests
+   keep their existing import surface.
+2. **`currentWebhookHost(prisma, workspaceId)`** — the "current live
+   host" KNOWN SOURCE: the PO-persisted `Workspace.liveHost` (new
+   additive column, written ONLY by the Refresh action — a rotation is
+   a PO event, never a background write) wins, else the D-13a
+   `resolveWebhookBase` .env precedence.
+3. **`/api/admin/webhooks` GET gains `stale` fields (additive):**
+   each row now carries `stale` (its stored host ≠ the current known
+   host, ACTIVE rows only — a dead connection's URL is audit trail)
+   + `storedHost`/`staleHost`, and the response names `currentBase`
+   + `currentBaseSource` (so the panel auto-suggests the correct host).
+   The list does NOT auto-refresh — the PO clicks Refresh.
+4. **`POST /api/admin/webhooks/refresh`** — re-points every ACTIVE
+   row to the entered host via `refreshWebhookUrlsToHost` (the host
+   substring only: id, client, platform + `endpointSecret`/keyHash/
+   connection log are never read or written); one `refresh_webhook…`
+   AuditLog row per CHANGED row (client-scoped; an idempotent 0-change
+   run writes none); then PERSISTS that host to `Workspace.liveHost`
+   (workspace-scoped, so a multi-workspace setup never leaks one
+   workspace's host into another's URLs); a loopback host is accepted
+   but flagged `loopback: true` (the D-13a banner case).
+5. **Panel UI:** a "Refresh URLs to the current live host" card (host
+   input pre-filled from the persisted `Workspace.liveHost`, else the
+   .env base; result = N updated / N already current + the per-row
+   `before → after` lines), a per-row `URL is stale (host X ≠
+   current)` warning badge, and the FlexiFunnels quick-action now
+   offers a **copy (current host)** URL (re-hosted against the live
+   host via the pure `rehostInboundUrl`, with a copy button) so the
+   PO can always copy a reachable URL — even before clicking
+   Refresh — alongside the stored URL (the stale row shows both).
+
+**Task 2 — webhook-connection hard delete.** The D-13 soft revoke
+(`active=false`) is replaced by `POST /api/admin/webhooks/delete` +
+`deleteWebhookEndpoint` (a real delete; the `revoke/` route is
+removed, its name retired in the UI + tests):
+- `WebhookConnectionLog.endpoint` is `onDelete: Cascade` in the
+  schema → deleting the row takes its connection-level connLogs with
+  it (they are THIS connection's trail).
+- The RAW-received-payload `WebhookLog` rows carry NO endpoint
+  relation and are PRESERVED (client-scoped received-payload audit; a
+  heavier "purge this client's raw webhook logs" is a separate,
+  explicit PO decision — never folded into the row delete).
+- The route writes the AuditLog row BEFORE the delete (actor +
+  target endpoint id/platform/label, action `delete_webhookEndpoint`;
+  details carry platform + label only — the per-connection secret is
+  never logged or even named in the route file, which the test
+  locks), so the trail outlives the row. Unknown / already-deleted
+  id → clean 404 "unknown connection", never a 500 (idempotent-by-404).
+- **ApiKey revoke stays SOFT** (`revokedAt` stamp) unless the PO asks
+  for hard-deleting keys (D-15 default; recorded).
+- UI: the per-row button is now "delete", gated by a type-`DELETE`
+  confirm (destructive action); the table keeps the pre-D-15
+  `active=false` "revoked" state visible for legacy rows.
+
+**Security surface:** admin-only (`admin_integrations`, owner/admin)
+— both new routes go through `gate("admin_integrations")`; the
+refresh route rejects a non-URL host up front (`'host' must be an
+absolute base URL`), so it can never silently no-op; the stale badge
+is read-only (no background write on load). No new `.env` keys
+(`PUBLIC_BASE_URL` stays the GENERATION base; `Workspace.liveHost`
+is the RUNTIME known source — the ticket's distinction).
+
+**Guardrails honoured:** NO money/CAPI path touched — only the
+`WebhookEndpoint.inboundUrl` string is rewritten and the delete is a
+bare row + cascade; `dev.db` WAL stands, single-writer discipline
+kept (prod stopped for the `liveHost` `db push` + prisma generate,
+then restarted after build); pull rows untouched (fixed point
+ad=3818 / adSet=1177 / spend=3818, G1=cl_upcurvv — re-verified after
+the refresh runs); `.env`/`dev.db`/`.next`/`.d15-*` scratch NOT in
+the commit.
+
+**Verification:** `test/d15.test.ts` 17/17 — the host-only rewrite
++ idempotency (path `?client=&conn=` survives the host swap verbatim;
+second run changes 0), the `currentWebhookHost` precedence
+(persisted `liveHost` wins over a stale `.env`; blank liveHost falls
+through; trailing slash trimmed), `refreshWebhookUrlsToHost`
+re-points ACTIVE rows only + secret byte-identical + connLog intact,
+the hard delete (row gone, connLogs cascaded, raw WebhookLog
+preserved, unknown id → `deleted:false`), and the route contracts
+(audit-BEFORE-delete textual order + the delete route never names
+the secret field; refresh route persists `liveHost` + audits only
+changed rows). `pnpm typecheck` 0 · `pnpm build` 0 (the earlier
+`node:crypto` client-bundle failure fixed by the `webhookUrl.ts`
+split) · full `pnpm test` 245/245. **LIVE before/after (prod,
+`cl_abhishek-pal-fml`):** before = the live `flexi` connection
+(`conn=cmwd9nk17000dizs4yj7jz7ks`) `stale=true` on the dead
+`tourist-filtering-sheriff-firmware` host; `POST /api/admin/webhooks/
+refresh {host: manhattan-cloth-bestsellers-town}` → `updated=1,
+unchanged=0` (the 6 dead rows untouched — active-only scope), the
+after-list shows the row re-pointed to
+`https://manhattan-cloth-bestsellers-town.trycloudflare.com/api/
+webhooks/flexifunnels?client=cl_abhishek-pal-fml&conn=cmwd9nk17…`,
+`stale=false`, `currentBaseSource=workspace.liveHost` (proof the host
+was PERSISTED, not just env-derived); an idempotent re-run reports
+`updated=0, unchanged=1`; exactly one `refresh_webhookEndpoint`
+audit row (the 2nd run wrote 0) and `Workspace.liveHost` = the
+manhattan host. Evidence: `.d15-before.json` / `.d15-refresh.json` /
+`.d15-after.json` / `.d15-refresh2.json` (gitignored `.d15-*`).
+
+**Next gate = PO re-pastes the (now reachable) FlexiFunnels
+inboundUrl + `x-webhook-secret` for the `flexi` connection into
+FlexiFunnels (Form Settings → Webhooks (leads) + Products → Product
+Rules → Webhook (purchases) — the panel's quick-action card shows the
+copy-now current-host URL) + drives ONE real FlexiFunnels order →
+G4 FlexiFunnels real-provider proof (first G4 platform unblocked
+without a gateway API key), then G5/G9.**

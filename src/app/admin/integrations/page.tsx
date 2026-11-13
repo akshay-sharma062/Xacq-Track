@@ -3,7 +3,7 @@ import { getSession } from "@/lib/api-utils";
 import { can } from "@/lib/session";
 import { adapterCatalog } from "@/lib/adapters";
 import { prisma } from "@/lib/prisma";
-import { resolveWebhookBase, isLoopbackBase, WebhookBaseSource } from "@/lib/integrations";
+import { resolveWebhookBase, isLoopbackBase, currentWebhookHost, WebhookBaseSource } from "@/lib/integrations";
 import { IntegrationsPanel } from "./IntegrationsPanel";
 
 /**
@@ -65,6 +65,13 @@ export default async function AdminIntegrationsPage() {
   const webhookBase = resolveWebhookBase();
   const baseIsLoopback = isLoopbackBase(webhookBase.base);
 
+  // D-15: the "current live host" the panel auto-suggests in its Refresh
+  // input + offers in the FlexiFunnels copy-paste block. The known source is
+  // Workspace.liveHost (PO-persisted by the last Refresh), else the .env
+  // base. null = nothing persisted yet.
+  const live = await currentWebhookHost(prisma, s.workspaceId);
+  const liveHost = live.source === "workspace.liveHost" ? live.base : null;
+
   return (
     <>
       <Topbar title="Webhooks & API keys" crumb="D-13 · multiple connections per client×platform" />
@@ -74,6 +81,7 @@ export default async function AdminIntegrationsPage() {
         base={webhookBase.base}
         baseSource={webhookBase.source}
         baseIsLoopback={baseIsLoopback}
+        liveHost={liveHost}
       />
     </>
   );

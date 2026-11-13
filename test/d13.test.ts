@@ -21,10 +21,10 @@
  *   4. Legacy no-conn path unchanged: the [platform] route keeps
  *      `client.webhookSecret` as the fallback when `conn` is absent, and the
  *      conn selection is an OPTIONAL search param (contract assert).
- *   5. Revoked conn -> 404: revokeWebhookEndpoint (active=false, idempotent)
- *      makes resolveEndpointForRoute return null; the route maps null to a
- *      clean 404 "unknown connection" (contract assert), never a fallback to
- *      the legacy secret.
+ *   5. D-15 hard delete -> 404: deleteWebhookEndpoint removes the row + its
+ *      cascaded connLogs (keeping the raw WebhookLog rows); an unknown id
+ *      returns { deleted:false } (the route maps that to a clean 404, never
+ *      a 500); resolveEndpointForRoute returns null for a deleted conn.
  *   6. Audit-log write on create/revoke (auditAction functional test + the
  *      routes wiring it) and conn-log write on receipt (recordConnectionLog:
  *      one payload-hash-only row per event; the model has no raw-payload
@@ -42,7 +42,7 @@ import {
   createApiKey,
   revokeApiKey,
   createWebhookEndpoint,
-  revokeWebhookEndpoint,
+  deleteWebhookEndpoint,
   resolveEndpointForRoute,
   recordConnectionLog,
   isPlatform,
@@ -63,7 +63,7 @@ const ROUTE_CONN = readFileSync("src/app/api/webhooks/[platform]/route.ts", "utf
 const ROUTE_KEYS = readFileSync("src/app/api/admin/keys/route.ts", "utf8");
 const ROUTE_KEYS_REVOKE = readFileSync("src/app/api/admin/keys/revoke/route.ts", "utf8");
 const ROUTE_HOOKS = readFileSync("src/app/api/admin/webhooks/route.ts", "utf8");
-const ROUTE_HOOK_REVOKE = readFileSync("src/app/api/admin/webhooks/revoke/route.ts", "utf8");
+const ROUTE_HOOK_DELETE = readFileSync("src/app/api/admin/webhooks/delete/route.ts", "utf8");
 const ROUTE_HOOK_LOGS = readFileSync("src/app/api/admin/webhooks/[id]/logs/route.ts", "utf8");
 
 // ---------------------------------------------------------------------------
@@ -219,10 +219,10 @@ describe("D-13 WebhookEndpoint — multiple connections per client×platform", (
 });
 
 // ---------------------------------------------------------------------------
-// 5 — Revoked conn -> 404 (soft revoke, never a delete).
+// 5 — D-15 hard delete -> 404 (the conn row is gone, so the route 404s it).
 // ---------------------------------------------------------------------------
 
-describe("D-13 revokeWebhookEndpoint — soft revoke makes the conn unresolvable", () => {
+describe("D-15 deleteWebhookEndpoint — hard delete removes the conn + cascades its connLogs", () => {
   let db: TestDb;
   beforeEach(async () => {
     db = await freshDb();
@@ -231,20 +231,28 @@ describe("D-13 revokeWebhookEndpoint — soft revoke makes the conn unresolvable
     await db.close();
   });
 
-  it("revokeWebhookEndpoint sets active=false (idempotent); resolveEndpointForRoute then returns null (the route maps that to 404)", async () => {
-    const ep = await createWebhookEndpoint(db.prisma, { clientId: FIT, platform: "flexifunnels", label: "d13-revoked", createdBy: OWNER });
+  it("deleteWebhookEndpoint removes the row (idempotent); resolveEndpointForRoute then returns null (the route maps that to 404)", async () => {
+    const ep = await createWebhookEndpoint(db.prisma, { clientId: FIT, platform: "flexifunnels", label: "d13-deleted", createdBy: OWNER });
+    // A conn log + a raw WebhookLog row so the cascade/preserve contract is proven:
+    await db.prisma.webhookConnectionLog.create({ data: { endpointId: ep.id, status: "ok", payloadHash: "h1", error: null } });
+    await db.prisma.webhookLog.create({ data: { clientId: FIT, platform: "flexifunnels", rawPayload: '{"o":1}' } });
+    const connLogCountBefore = await db.prisma.webhookConnectionLog.count();
+    const webhookLogCountBefore = await db.prisma.webhookLog.count();
+
     expect(await resolveEndpointForRoute(db.prisma, ep.id, FIT, "flexifunnels")).not.toBeNull();
 
-    expect((await revokeWebhookEndpoint(db.prisma, ep.id)).revoked).toBe(true);
-    // Soft revoke: the row + secret + connection log survive; only active flips.
-    const row = await db.prisma.webhookEndpoint.findUniqueOrThrow({ where: { id: ep.id } });
-    expect(row.active).toBe(false);
-    expect(row.endpointSecret).toBe(ep.secret); // still retrievable internally (HMAC verify)
-    // Revoked -> unresolvable:
+    expect((await deleteWebhookEndpoint(db.prisma, ep.id)).deleted).toBe(true);
+    // The row is gone:
+    expect(await db.prisma.webhookEndpoint.findUnique({ where: { id: ep.id } })).toBeNull();
+    // Its connection logs cascade with it (onDelete: Cascade):
+    expect(await db.prisma.webhookConnectionLog.count()).toBe(connLogCountBefore - 1);
+    // The raw WebhookLog rows are PRESERVED (client-scoped received-payload audit):
+    expect(await db.prisma.webhookLog.count()).toBe(webhookLogCountBefore);
+    // Deleted -> unresolvable:
     expect(await resolveEndpointForRoute(db.prisma, ep.id, FIT, "flexifunnels")).toBeNull();
-    // Idempotent:
-    expect(await revokeWebhookEndpoint(db.prisma, ep.id)).toEqual({ revoked: false });
-    expect(await revokeWebhookEndpoint(db.prisma, "nope")).toEqual({ revoked: false });
+    // Idempotent-by-404: re-deleting a gone row reports deleted:false, not a throw:
+    expect(await deleteWebhookEndpoint(db.prisma, ep.id)).toEqual({ deleted: false });
+    expect(await deleteWebhookEndpoint(db.prisma, "nope")).toEqual({ deleted: false });
   });
 
   it("the [platform] route maps an unresolvable conn to a clean 404 'unknown connection' (no legacy-secret fallback) (contract)", () => {
@@ -269,7 +277,7 @@ describe("D-13 audit + connection logs", () => {
     await db.close();
   });
 
-  it("an AuditLog row written the way the create/revoke routes wire auditAction (action/entity/entityId) lands + is well-shaped", async () => {
+  it("an AuditLog row written the way the create/delete routes wire auditAction (action/entity/entityId) lands + is well-shaped", async () => {
     // Mirror security.auditAction's write (it is NOT prisma-parameterized — it
     // uses the global singleton, which under vitest could target dev.db). We
     // write the SAME row shape through the isolated temp DB instead; the route
@@ -279,7 +287,7 @@ describe("D-13 audit + connection logs", () => {
       data: { clientId: FIT, userId: OWNER, action: "create", entity: "apiKey", entityId: "k_1", details: JSON.stringify({ label: "d13-audit", purpose: "api" }) },
     });
     await db.prisma.auditLog.create({
-      data: { clientId: FIT, userId: OWNER, action: "revoke", entity: "webhookEndpoint", entityId: "w_1", details: JSON.stringify({ platform: "flexifunnels", label: "d13" }) },
+      data: { clientId: FIT, userId: OWNER, action: "delete_webhookEndpoint", entity: "webhookEndpoint", entityId: "w_1", details: JSON.stringify({ platform: "flexifunnels", label: "d13" }) },
     });
     const rows = await db.prisma.auditLog.findMany({ where: { clientId: FIT, userId: OWNER } });
     expect(rows).toHaveLength(2);
@@ -288,7 +296,7 @@ describe("D-13 audit + connection logs", () => {
     expect(byEntity.k_1?.action).toBe("create");
     expect(byEntity.k_1?.entity).toBe("apiKey");
     expect(JSON.parse(byEntity.k_1!.details ?? "{}")).toEqual({ label: "d13-audit", purpose: "api" });
-    expect(byEntity.w_1?.action).toBe("revoke");
+    expect(byEntity.w_1?.action).toBe("delete_webhookEndpoint");
     expect(byEntity.w_1?.entity).toBe("webhookEndpoint");
   });
 
@@ -319,7 +327,7 @@ describe("D-13 audit + connection logs", () => {
     expect(mapConnStatus("failed")).toBe("failed");
   });
 
-  it("the admin routes wire the audit write on create/revoke and never leak keyHash/endpointSecret in list responses (contract)", () => {
+  it("the admin routes wire the audit write on create/delete and never leak keyHash/endpointSecret in list responses (contract)", () => {
     // Keys: audit on create (keys/route.ts POST) + revoke (keys/revoke/route.ts POST),
     // client-scoped; the workspace key is row-audited (no audit-log client FK target).
     expect(ROUTE_KEYS).toMatch(/auditAction\(s, clientId, "create", "apiKey"/);
@@ -327,11 +335,14 @@ describe("D-13 audit + connection logs", () => {
     // Unknown key id -> 404, not 500; idempotent revoke:
     expect(ROUTE_KEYS_REVOKE).toMatch(/unknown key/);
     expect(ROUTE_KEYS_REVOKE).toMatch(/status: 404/);
-    // Endpoints: audit on create + revoke; unknown-id 404s; duplicate label 409.
+    // Endpoints: audit on create + D-15 hard delete; unknown-id 404s; duplicate label 409.
     expect(ROUTE_HOOKS).toMatch(/auditAction\(s, clientId, "create", "webhookEndpoint"/);
-    expect(ROUTE_HOOK_REVOKE).toMatch(/auditAction\(s, ep\.clientId, "revoke", "webhookEndpoint"/);
-    expect(ROUTE_HOOK_REVOKE).toMatch(/unknown connection/);
-    expect(ROUTE_HOOK_REVOKE).toMatch(/status: 404/);
+    // D-15: the delete route audits BEFORE the row goes (audit-before-delete) and 404s unknown:
+    expect(ROUTE_HOOK_DELETE).toMatch(/auditAction\(s, ep\.clientId, "delete_webhookEndpoint", "webhookEndpoint"/);
+    expect(ROUTE_HOOK_DELETE).toMatch(/unknown connection/);
+    expect(ROUTE_HOOK_DELETE).toMatch(/status: 404/);
+    expect(ROUTE_HOOKS).toMatch(/P2002/);
+    expect(ROUTE_HOOKS).toMatch(/status: 409/);
     expect(ROUTE_HOOKS).toMatch(/P2002/);
     expect(ROUTE_HOOKS).toMatch(/status: 409/);
     // The LIST response's select block never names endpointSecret (the

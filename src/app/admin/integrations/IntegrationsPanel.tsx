@@ -2,6 +2,10 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { WebhookBaseSource } from "@/lib/integrations";
+// D-15: the pure host helpers live in @/lib/webhookUrl (no node:crypto, no
+// Prisma) — a value-import from @/lib/integrations would drag node:crypto
+// into the browser bundle (the panel is a client component).
+import { rehostInboundUrl } from "@/lib/webhookUrl";
 
 /**
  * D-13 — the integrations admin panel (client component). Talks to the
@@ -17,9 +21,20 @@ import { WebhookBaseSource } from "@/lib/integrations";
  *     (reversible-stored so HMAC gateways can verify). Same show-once
  *     treatment. The list response deliberately omits the secret.
  *
- *   - Revoke is a soft row stamp (revokedAt / active=false), never a delete:
- *     the connection log + audit trail stay intact, lastReceivedAt stays
- *     visible.
+ *   - Webhook connections: D-15 turned revoke into a HARD delete. The button
+ *     is labelled "delete" and gated behind a type-to-confirm: deleting a
+ *     connection removes the row + its cascaded connLogs, but the RAW
+ *     WebhookLog rows (client-scoped received-payload audit) are preserved,
+ *     and an AuditLog row is written BEFORE the delete so the trail outlives
+ *     the row. The per-row lastReceivedAt disappears with the row (that is
+ *     the point of a hard delete) — but its audit/conn log survive.
+ *
+ *   - Host-staleness (D-15): quick-tunnel subdomains rotate, so a stored
+ *     inboundUrl can point at a DEAD host. Each row carries a `stale` flag
+ *     (its host ≠ the current known host). The "Refresh URLs" control
+ *     re-points every ACTIVE row to the live host in one click (idempotent;
+ *     secret untouched) and persists that host. The FlexiFunnels quick-
+ *     action offers a "current host" variant to copy even before refreshing.
  *
  * The FlexiFunnels quick-action card renders the two paste targets the PO
  * named (Form Settings → Webhooks for leads; Products → Product Rules →
@@ -46,6 +61,12 @@ interface WebhookRow {
   active: boolean;
   createdAt: string;
   lastReceivedAt: string | null;
+  // D-15 host-staleness: the GET list compares each stored URL's host to the
+  // "current live host" (Workspace.liveHost, else the .env base) and flags
+  // the row stale when they differ — a DEAD quick-tunnel subdomain. Only
+  // ACTIVE rows are flagged (a dead connection's URL is audit trail).
+  stale?: boolean;
+  staleHost?: string;
 }
 interface ClientOpt {
   id: string;
@@ -133,6 +154,7 @@ export function IntegrationsPanel({
   base,
   baseSource,
   baseIsLoopback,
+  liveHost,
 }: {
   platforms: PlatformOpt[];
   clients: ClientOpt[];
@@ -142,10 +164,30 @@ export function IntegrationsPanel({
   baseSource: WebhookBaseSource;
   /** True when `base` is a loopback host external providers can't reach. */
   baseIsLoopback: boolean;
+  /** D-15: the PO-persisted "current live host" (Workspace.liveHost). The
+   *  "Refresh URLs" input auto-suggests this; when null the .env base is the
+   *  known source instead. */
+  liveHost: string | null;
 }) {
   const [keys, setKeys] = useState<KeyRow[] | null>(null);
   const [webhooks, setWebhooks] = useState<WebhookRow[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
+
+  // D-15 host-aware refresh: the live host the PO is re-pointing every ACTIVE
+  // connection to. Auto-suggested from the persisted Workspace.liveHost (else
+  // the .env generation base). A rotation is a PO event, not a background
+  // write — the panel only re-points when this button is clicked.
+  const [refreshHost, setRefreshHost] = useState<string>(liveHost ?? base);
+  const [refreshBusy, setRefreshBusy] = useState(false);
+  const [refreshResult, setRefreshResult] = useState<null | {
+    updated: number;
+    unchanged: number;
+    loopback: boolean;
+    rows: { label: string; before: string; after: string; changed: boolean }[];
+  }>(null);
+  // D-15: hard-delete is destructive → a per-row confirm (type-to-confirm).
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [deleteText, setDeleteText] = useState<Record<string, string>>({});
 
   // One-time reveal state (create response, never re-fetched).
   const [newKey, setNewKey] = useState<{ key: string; id: string } | null>(null);
@@ -229,14 +271,56 @@ export function IntegrationsPanel({
     load();
   }
 
-  async function revokeHook(id: string) {
-    const r = await fetch("/api/admin/webhooks/revoke", {
+  /** D-15: HARD-delete a connection (the row + its cascaded connLogs; the
+   *  raw WebhookLog rows stay). Destructive, so the button only fires after
+   *  the type-to-confirm is complete. */
+  async function deleteHook(id: string) {
+    const r = await fetch("/api/admin/webhooks/delete", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id }),
     });
     const j = await r.json().catch(() => ({}));
-    if (!r.ok) setErr(j.error ?? `error ${r.status}`);
+    setConfirmDelete(null);
+    if (!r.ok) {
+      setErr(j.error ?? `error ${r.status}`);
+      return;
+    }
+    load();
+  }
+
+  /** D-15: "Refresh URLs" — re-point every ACTIVE connection's inboundUrl to
+   *  the current live host + persist it as the known source. Idempotent. */
+  async function refreshUrls() {
+    setErr(null);
+    setRefreshResult(null);
+    if (!refreshHost.trim()) {
+      setErr("enter the current live host (the active quick-tunnel subdomain)");
+      return;
+    }
+    setRefreshBusy(true);
+    const r = await fetch("/api/admin/webhooks/refresh", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ host: refreshHost.trim() }),
+    });
+    const j = await r.json().catch(() => ({}));
+    setRefreshBusy(false);
+    if (!r.ok) {
+      setErr(j.error ?? `error ${r.status}`);
+      return;
+    }
+    setRefreshResult({
+      updated: j.updated ?? 0,
+      unchanged: j.unchanged ?? 0,
+      loopback: Boolean(j.loopback),
+      rows: (j.rows ?? []).map((x: { label: string; before: string; after: string; changed: boolean }) => ({
+        label: x.label,
+        before: x.before,
+        after: x.after,
+        changed: x.changed,
+      })),
+    });
     load();
   }
 
@@ -266,6 +350,23 @@ export function IntegrationsPanel({
   // it inline; an older one shows "re-create to get a fresh secret" (the
   // value can't be re-read — by design).
   const ffHooks = (webhooks ?? []).filter((w) => w.platform === "flexifunnels");
+
+  // D-15: the CURRENT live host to copy from — the PO-persisted Workspace
+  // liveHost (written by "Refresh URLs") wins; else the .env generation base.
+  // The copy-paste block re-hosts each connection against this, so the PO
+  // always copies a REACHABLE URL even when the stored one is stale.
+  const ffHost = liveHost ?? base;
+  const ffUrlFor = (w: WebhookRow): string => rehostInboundUrl(w.inboundUrl, ffHost) ?? w.inboundUrl;
+  const [copiedFf, setCopiedFf] = useState<string | null>(null);
+  async function copyFfUrl(id: string, url: string) {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopiedFf(id);
+      setTimeout(() => setCopiedFf(null), 1500);
+    } catch {
+      /* clipboard blocked — the URL is selectable */
+    }
+  }
 
   // D-13a: the current-generation base + which tier it came from. Shown in
   // the Webhook-connections header, and BANNERED when it's a loopback host
@@ -392,6 +493,64 @@ export function IntegrationsPanel({
           </span>
         </div>
 
+        {/* D-15: host-aware refresh. Quick-tunnel subdomains rotate on every
+            cloudflared restart, so a stored inboundUrl can point at a DEAD
+            host while the path/secret/platform are all still valid. The PO
+            enters the CURRENT live host and re-points every ACTIVE row in one
+            click — the host substring is rewritten, nothing else (idempotent;
+            a second run changes 0). The host is persisted as the known source
+            the list's stale-badge compares against. */}
+        <div
+          className="card"
+          style={{ background: "var(--panel-2)", marginBottom: 12, borderColor: "rgba(120,180,255,0.25)" }}
+        >
+          <div style={{ marginBottom: 8 }}>
+            <h3 style={{ margin: 0, fontSize: 13 }}>Refresh URLs to the current live host</h3>
+            <div className="faint" style={{ fontSize: 11, marginTop: 3 }}>
+              The quick-tunnel subdomain rotates on every cloudflared restart. When FlexiFunnels
+              rejects a stored URL as "unreachable/incorrect", the path is fine — only the host is
+              stale. Fill in the ACTIVE subdomain and refresh; every active connection re-points,
+              the secret + conn id stay the same.
+            </div>
+          </div>
+          <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+            <input
+              value={refreshHost}
+              onChange={(e) => setRefreshHost(e.target.value)}
+              placeholder={`current live host (e.g. ${liveHost ?? base})`}
+              style={{ width: 340, fontSize: 12 }}
+            />
+            <button className="btn primary sm" onClick={refreshUrls} disabled={refreshBusy || !refreshHost.trim()}>
+              {refreshBusy ? "refreshing…" : "Refresh URLs"}
+            </button>
+          </div>
+          {refreshResult ? (
+            <div className="faint" style={{ marginTop: 10 }}>
+              <div style={{ fontSize: 12 }}>
+                <span className="badge good">{refreshResult.updated} updated</span>{" "}
+                <span className="badge accent">{refreshResult.unchanged} already current</span>
+                {refreshResult.loopback ? (
+                  <span className="badge warn" style={{ marginLeft: 8 }}>loopback host — external providers can't reach it</span>
+                ) : null}
+              </div>
+              {refreshResult.rows.filter((r) => r.changed).length ? (
+                <div className="stack" style={{ gap: 3, marginTop: 6 }}>
+                  {refreshResult.rows.filter((r) => r.changed).map((r, i) => (
+                    <div key={i} className="mono" style={{ fontSize: 10, wordBreak: "break-all" }}>
+                      {r.label}: <span className="bad">{r.before}</span> → <span className="good">{r.after}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
+                  No change needed — every active connection already points at{" "}
+                  <code className="mono">{refreshResult.rows[0]?.after ?? refreshHost}</code> (idempotent run).
+                </div>
+              )}
+            </div>
+          ) : null}
+        </div>
+
         <div className="row" style={{ marginBottom: 12, flexWrap: "wrap" }}>
           <input placeholder="label (e.g. FlexiFunnels leads)" value={wLabel} onChange={(e) => setWLabel(e.target.value)} style={{ width: 200 }} />
           <select value={wClient} onChange={(e) => setWClient(e.target.value)} style={{ minWidth: 140 }}>
@@ -449,20 +608,58 @@ export function IntegrationsPanel({
                   <td><span className="badge accent">{w.platform}</span></td>
                   <td>
                     <code className="mono" style={{ fontSize: 10, wordBreak: "break-all" }}>{w.inboundUrl}</code>
+                    {/* D-15: host-staleness badge — the stored host differs from
+                        the current known host (a DEAD subdomain). Surfaced,
+                        NOT auto-fixed: the PO clicks "Refresh URLs" above. */}
+                    {w.stale ? (
+                      <span className="badge warn" style={{ marginLeft: 6, fontSize: 10 }}>
+                        URL is stale — host ≠ current live host ({w.staleHost})
+                      </span>
+                    ) : null}
                   </td>
                   <td className="faint" style={{ fontSize: 12 }}>{fmtTs(w.createdAt)}</td>
                   <td className="faint" style={{ fontSize: 12 }}>{fmtTs(w.lastReceivedAt)}</td>
                   <td>
+                    {/* Pre-D-15 rows may still carry active=false (the old
+                        soft-revoke state); D-15 rows are active until deleted. */}
                     {w.active ? <span className="badge good">active</span> : <span className="badge bad">revoked</span>}
                   </td>
                   <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
                     <button className="btn sm" style={{ marginRight: 6 }} onClick={() => openLogs(w.id)}>
                       {openLog === w.id ? "hide logs" : "logs"}
                     </button>
-                    {w.active ? (
-                      <button className="btn danger sm" onClick={() => revokeHook(w.id)}>revoke</button>
+                    {/* D-15: revoke is now a HARD delete, gated by a
+                        type-to-confirm because it's destructive. */}
+                    {confirmDelete === w.id ? (
+                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <input
+                          placeholder="type DELETE"
+                          value={deleteText[w.id] ?? ""}
+                          onChange={(e) => setDeleteText((m) => ({ ...m, [w.id]: e.target.value }))}
+                          style={{ width: 90, fontSize: 11 }}
+                        />
+                        <button
+                          className="btn danger sm"
+                          disabled={(deleteText[w.id] ?? "") !== "DELETE"}
+                          onClick={() => deleteHook(w.id)}
+                        >
+                          delete
+                        </button>
+                        <button
+                          className="btn sm"
+                          onClick={() => {
+                            setConfirmDelete(null);
+                            setDeleteText((m) => {
+                              const { [w.id]: _drop, ...rest } = m;
+                              return rest;
+                            });
+                          }}
+                        >
+                          cancel
+                        </button>
+                      </div>
                     ) : (
-                      <span className="faint" style={{ fontSize: 11 }}>revoked</span>
+                      <button className="btn danger sm" onClick={() => setConfirmDelete(w.id)}>delete</button>
                     )}
                   </td>
                 </tr>
@@ -530,8 +727,27 @@ export function IntegrationsPanel({
                   <span className="badge accent">{w.label}</span>
                   <span className={w.active ? "good" : "bad"} style={{ fontSize: 11 }}>{w.active ? "active" : "revoked"}</span>
                 </div>
-                <div className="faint" style={{ fontSize: 11, marginBottom: 8 }}>
-                  <code className="mono" style={{ wordBreak: "break-all" }}>{w.inboundUrl}</code>
+                {/* D-15: copy the CURRENT-host URL (re-hosted against the live
+                    host), so the PO always copies a reachable URL even when
+                    the stored one is stale. The secret is what the provider
+                    echoes / signs with (x-webhook-secret). */}
+                <div className="stack" style={{ gap: 4, marginBottom: 8 }}>
+                  <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <span className="faint" style={{ fontSize: 11 }}>copy (current host):</span>
+                    <code className="mono" style={{ fontSize: 10, wordBreak: "break-all", userSelect: "all" }}>
+                      {ffUrlFor(w)}
+                    </code>
+                    <button className="btn sm" onClick={() => copyFfUrl(w.id, ffUrlFor(w))}>
+                      {copiedFf === w.id ? "copied ✓" : "copy"}
+                    </button>
+                  </div>
+                  {w.stale ? (
+                    <div className="faint" style={{ fontSize: 11 }}>
+                      stored: <span className="warn">{w.inboundUrl}</span> (host ≠ current — use the copy above, or "Refresh URLs")
+                    </div>
+                  ) : (
+                    <div className="faint" style={{ fontSize: 11 }}>inboundUrl: <code className="mono" style={{ wordBreak: "break-all" }}>{w.inboundUrl}</code></div>
+                  )}
                 </div>
                 <table className="tbl">
                   <thead>

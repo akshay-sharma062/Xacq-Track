@@ -24,7 +24,6 @@ import {
   isLoopbackBase,
   buildInboundUrl,
   createWebhookEndpoint,
-  revokeWebhookEndpoint,
   refreshWebhookInboundUrls,
 } from "../src/lib/integrations";
 import { flexifunnelsAdapter } from "../src/lib/adapters/payments";
@@ -238,8 +237,10 @@ describe("D-13a refreshWebhookInboundUrls — idempotent + secret-untouched", ()
 
   it("the refresh re-points ACTIVE rows ONLY — a revoked connection keeps its URL (ticket step 3: 'all active rows')", async () => {
     const ep = await seedEndpoints(db.prisma);
-    // Revoke one (c) — it stays localhost-based by design (audit trail).
-    expect((await revokeWebhookEndpoint(db.prisma, ep.c.id)).revoked).toBe(true);
+    // D-15: revoke is now a hard delete, so to get a NON-ACTIVE row here we
+    // flip active=false directly (the old D-13 soft-revoke state the
+    // "active-only refresh" scope still needs to prove against).
+    await db.prisma.webhookEndpoint.update({ where: { id: ep.c.id }, data: { active: false } });
 
     process.env.PUBLIC_BASE_URL = TUNNEL;
     const r = await refreshWebhookInboundUrls(db.prisma);

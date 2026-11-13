@@ -27,6 +27,13 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { PrismaClient } from "./prisma";
 import { SourcePlatform } from "./types";
+import { urlHost, rehostInboundUrl } from "./webhookUrl";
+
+// D-15: the two PURE host helpers live in ./webhookUrl (no node:crypto, no
+// Prisma) so the CLIENT integrations panel can import them without dragging
+// node: into the browser bundle. They are re-exported here so the server
+// routes + tests keep their existing "@/lib/integrations" import.
+export { urlHost, rehostInboundUrl };
 
 // ---------------------------------------------------------------------------
 // Hashing + generation (pure — unit-testable without a DB).
@@ -216,12 +223,38 @@ export async function createWebhookEndpoint(prisma: PrismaClient, args: CreateEn
   return { id: row.id, platform: row.platform, label: row.label, clientId: row.clientId, inboundUrl, secret };
 }
 
-/** Soft revoke: active=false (not a delete — the connection log stays intact). */
-export async function revokeWebhookEndpoint(prisma: PrismaClient, id: string): Promise<{ revoked: boolean }> {
-  const ep = await prisma.webhookEndpoint.findUnique({ where: { id } });
-  if (!ep || !ep.active) return { revoked: false };
-  await prisma.webhookEndpoint.update({ where: { id }, data: { active: false } });
-  return { revoked: true };
+// ---------------------------------------------------------------------------
+// D-15 — webhook connection: HARD delete.
+//
+// PO request ("revoke karne par delete hi ho jaye"): revoke is now a real
+// delete. Safety model (the ticket's rules, recorded in DECISIONS D-15):
+//   - WebhookConnectionLog.endpoint is `onDelete: Cascade` in the schema, so
+//     deleting an endpoint takes its connection-level log rows with it (they
+//     are THIS connection's trail).
+//   - The RAW-received-payload `WebhookLog` rows are client-scoped audit of
+//     what actually arrived and carry NO endpoint relation — they are NOT
+//     cascade-deleted here (a heavier, explicit delete is a separate PO
+//     decision, never folded in silently).
+//   - The DELETE route writes an AuditLog row BEFORE the delete (actor,
+//     target endpoint id/platform/label, action "delete_webhookEndpoint"),
+//     so the audit trail outlives the row. Audit details carry platform +
+//     label only — NEVER the endpointSecret.
+//   - ApiKey revoke stays SOFT (revokedAt stamp) unless the PO explicitly
+//     asks for hard-deleting keys (D-15 default, recorded).
+// ---------------------------------------------------------------------------
+
+/**
+ * D-15: hard-delete a webhook CONNECTION (the row + its cascaded connLogs;
+ * the raw WebhookLog rows are untouched). Unknown id → { deleted:false }
+ * (the route maps that to a clean 404, never a 500).
+ */
+export async function deleteWebhookEndpoint(prisma: PrismaClient, id: string): Promise<{ deleted: boolean }> {
+  const ep = await prisma.webhookEndpoint.findUnique({ where: { id }, select: { id: true } });
+  if (!ep) return { deleted: false };
+  // connLogs cascade on delete (schema onDelete: Cascade); WebhookLog rows
+  // have no endpoint relation and stay (client-scoped raw-received audit).
+  await prisma.webhookEndpoint.delete({ where: { id } });
+  return { deleted: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -249,6 +282,45 @@ export function buildInboundUrl(
   source: WebhookBaseSource
 ): WebhookInboundUrl {
   return { url: `${base}/api/webhooks/${ep.platform}?client=${ep.clientId}&conn=${ep.id}`, source };
+}
+
+// ---------------------------------------------------------------------------
+// D-15 — host-aware inboundUrl handling.
+//
+// Quick-tunnel subdomains (PUBLIC_BASE_URL) ROTATE on every cloudflared
+// restart, so a stored WebhookEndpoint.inboundUrl can point at a DEAD
+// subdomain — the path (?client=…&conn=…), secret, and platform are all
+// stable; ONLY the host is stale. These helpers make that self-healing:
+//   - urlHost / rehostInboundUrl: the two PURE host helpers, re-exported
+//     from ./webhookUrl (imported above) so the CLIENT panel can use them
+//     without dragging node: into the browser bundle.
+//   - currentWebhookHost: the "current live host" KNOWN SOURCE — the
+//     PO-persisted Workspace.liveHost (set by the Refresh action) wins, else
+//     the .env PUBLIC_BASE_URL (D-13a precedence).
+// The admin list compares each stored URL's host to this known source and
+// surfaces a "URL is stale (host X ≠ current Y)" badge; it does NOT
+// auto-refresh on every load (a rotation is a PO event, not a background
+// write) — the PO clicks "Refresh URLs" to re-point.
+// ---------------------------------------------------------------------------
+
+/**
+ * D-15: the "current live host" a webhook inboundUrl should point at. The
+ * PO-persisted `Workspace.liveHost` (written by the Refresh action) wins;
+ * otherwise fall back to the .env base (D-13a precedence). Returns the
+ * resolved base + which source supplied it.
+ */
+export async function currentWebhookHost(
+  prisma: PrismaClient,
+  workspaceId: string,
+  env: Record<string, string | undefined> = process.env
+): Promise<{ base: string; source: "workspace.liveHost" | WebhookBaseSource }> {
+  const ws = await prisma.workspace.findUnique({ where: { id: workspaceId }, select: { liveHost: true } });
+  const persisted = ws?.liveHost?.trim();
+  if (persisted && persisted.length) {
+    return { base: persisted.replace(/\/+$/, ""), source: "workspace.liveHost" };
+  }
+  const r = resolveWebhookBase(undefined, env);
+  return { base: r.base, source: r.source };
 }
 
 export interface RefreshWebhookUrlsResult {
@@ -292,6 +364,64 @@ export async function refreshWebhookInboundUrls(
     out.push({ id: ep.id, label: ep.label, platform: ep.platform, active: ep.active, changed, before: ep.inboundUrl, after: next.url });
   }
   return { base, source, baseIsLoopback: isLoopbackBase(base), rows: out, updated, unchanged };
+}
+
+/**
+ * D-15: re-point every ACTIVE connection's inboundUrl to `host` by rewriting
+ * ONLY the host substring (path + ?client=&conn= + secret untouched). The
+ * host argument is the "current live host" (Workspace.liveHost ?? the .env
+ * base, via currentWebhookHost). Idempotent: a second run with the same
+ * host changes 0 rows.
+ */
+export interface RefreshToHostRow {
+  id: string;
+  /** The connection's client — the refresh route's per-row audit is client-scoped. */
+  clientId: string;
+  label: string;
+  platform: string;
+  changed: boolean;
+  before: string;
+  after: string;
+}
+
+export interface RefreshToHostResult {
+  host: string;
+  updated: number;
+  unchanged: number;
+  rows: RefreshToHostRow[];
+}
+
+export async function refreshWebhookUrlsToHost(
+  prisma: PrismaClient,
+  host: string
+): Promise<RefreshToHostResult> {
+  const base = host.trim().replace(/\/+$/, "");
+  const rows = await prisma.webhookEndpoint.findMany({
+    where: { active: true },
+    select: { id: true, clientId: true, platform: true, label: true, inboundUrl: true },
+    orderBy: { createdAt: "asc" },
+  });
+  let updated = 0;
+  let unchanged = 0;
+  const out: RefreshToHostRow[] = [];
+  for (const ep of rows) {
+    // Only the host substring changes: keep the stored path + query
+    // (?client=&conn=) byte-for-byte. Falls back to rebuilding the URL from
+    // the row's fields when the stored value isn't a parseable absolute URL
+    // (defensive — it then still lands on the correct host).
+    const next = rehostInboundUrl(ep.inboundUrl, base) ?? buildInboundUrl(ep, base, "explicit").url;
+    const changed = next !== ep.inboundUrl;
+    if (changed) {
+      // ONLY the URL string is written — the id, client, platform and the
+      // endpointSecret are never read or touched (the ticket's hard rule).
+      await prisma.webhookEndpoint.update({ where: { id: ep.id }, data: { inboundUrl: next } });
+      updated++;
+    } else {
+      unchanged++;
+    }
+    out.push({ id: ep.id, clientId: ep.clientId, label: ep.label, platform: ep.platform, changed, before: ep.inboundUrl, after: next });
+  }
+  return { host: base, updated, unchanged, rows: out };
 }
 
 /**

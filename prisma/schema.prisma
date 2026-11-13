@@ -30,6 +30,16 @@ model Workspace {
   plan  String @default("internal") // internal | saas | trial
   createdAt DateTime @default(now())
 
+  // D-15: the PO-persisted "current live host" (the quick-tunnel subdomain
+  // external webhook providers POST to). `PUBLIC_BASE_URL` (.env) is the
+  // GENERATION-time base; this column is the RUNTIME known source the admin
+  // webhooks list compares each stored inboundUrl against, so a dead
+  // subdomain shows a "URL is stale (host X ≠ current Y)" badge instead of
+  // silently pointing the provider at a dead host. Set ONLY by the PO's
+  // "Refresh URLs" action (a subdomain rotation is a PO event, never a
+  // background write). Falls back to PUBLIC_BASE_URL when unset.
+  liveHost String?
+
   clients  Client[]
   users    User[]
 }
