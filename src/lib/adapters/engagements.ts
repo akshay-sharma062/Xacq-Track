@@ -213,6 +213,11 @@ export const sheetsAdapter: Adapter = {
       const phone = cols.phone ? row[cols.phone] : null;
       const email = cols.email ? row[cols.email] : null;
       const name = cols.name ? row[cols.name] : null;
+      // D-16: the mapping carries ALL fields (spec 6 "upload with column
+      // mapping") — city + product too, so a mapped sheet lands on the right
+      // lead fields (a missing mapping key = the field stays null, never a guess).
+      const city = cols.city ? row[cols.city] : null;
+      const product = cols.product ? row[cols.product] : null;
       const amount = cols.amount ? Number(row[cols.amount]) : null;
       const statusRaw = cols.status ? String(row[cols.status] ?? "").toLowerCase() : "";
       const status: NormalizedInbound["status"] = statusRaw === "paid" || statusRaw === "refunded"
@@ -223,6 +228,8 @@ export const sheetsAdapter: Adapter = {
         platform: "sheets",
         type,
         phone, email, name,
+        city: city ?? null,
+        product: product ?? null,
         value: amount, currency: "INR",
         status, gateway: "sheets",
         gatewayTxnId: `import_row_${i}`,

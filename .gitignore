@@ -96,3 +96,6 @@ pnpm-debug.log*
 
 # D-15 scratch evidence (live refresh before/after + idempotency; distilled findings in DECISIONS D-15)
 .d15-*
+
+# D-16 scratch evidence (live BLOCKED-path proof + the 400 non-Sheet case; distilled findings in DECISIONS D-16)
+.d16-*

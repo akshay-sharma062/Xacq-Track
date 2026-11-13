@@ -1228,3 +1228,104 @@ Rules → Webhook (purchases) — the panel's quick-action card shows the
 copy-now current-host URL) + drives ONE real FlexiFunnels order →
 G4 FlexiFunnels real-provider proof (first G4 platform unblocked
 without a gateway API key), then G5/G9.**
+
+## D-16 — Google Sheet lead-sync tab (2026-11-13)
+
+**Context (the PO's real problem):** the FlexiFunnels webhook path is
+BLOCKED on the unpaid pages, because those pages' only webhook slot is
+already taken by Pabbly. For THOSE leads the PO dumps them into a Google
+Sheet and wants to pull them in. D-16 adds a "Google Sheet sync" mode to
+the existing `/import` screen (spec §6 / G7 "upload with column mapping
++ commit-after-approve"), reusing the EXISTING pipeline so imported rows
+flow through the same dedup/identity/revenue logic.
+
+**Key design point — the public-sheet mechanism (no credentials):**
+a Google Sheet shared "Anyone with the link can view" exports CSV at a
+STABLE PUBLIC URL:
+`https://docs.google.com/spreadsheets/d/<SHEET_ID>/export?format=csv&gid=<TAB_GID>`.
+No OAuth, no service account. The fetch is **server-side only** (a
+browser fetch of a cross-origin Google sheet is CORS-restricted + not
+where it belongs). `src/lib/sheets.ts` holds the pure, testable logic:
+- `parseSheetLink(link, tabOverride?)` → the sheet id + the tab gid
+  (from the link's own `/d/<id>/<gid>` path, `?gid=` or `#gid=`; an
+  explicit override wins; the `/d/e/<key>/pub` publish-to-web form gets
+  its own `/pub?output=csv` export). Returns `null` for any non-Google-
+  Sheets link — the route 400s, it NEVER guesses a fetch target.
+- `fetchSheetCsv(target, fetchImpl?)` → server-side fetch (the injectable
+  `fetchImpl` is the seam the tests stub, per the `onboard.test.ts`
+  convention). A 200 CSV → `{ csv, columns, rowCount }` (BOM-stripped).
+  **Private sheets are BLOCKED, never faked:** a `401/403/404` returns
+  `ok:false` + the EXACT upstream status + a note naming the two ways
+  forward — (a) share it "Anyone with the link can view", or (b) the
+  Google API path which needs Google OAuth / service-account credentials
+  in `.env` (a SEPARATE, heavier ticket; RECORDED, not built here). A
+  200 whose body is a login/HTML page is blocked too (no HTML → no rows,
+  "never invent a lead"). An EMPTY sheet → `rowCount: 0` (0, not rows).
+- `suggestColumns(headers)` → best-effort auto-mapping of the fetched
+  headers onto phone/email/name/city/amount/status/product (the PO still
+  confirms in the selects before commit; an unmatched field stays blank).
+
+**The route + UI:**
+- `GET /api/import/sheets?client=<id>&url=<sheetLink>[&tab=<gid>]`
+  (`src/app/api/import/sheets/route.ts`): 401 unauth → 403 no client →
+  400 a non-Sheets link → 403 `{ blocked, upstreamStatus, note }` a
+  private/HTML sheet (the exact upstream status relayed, never invented)
+  → 200 `{ csv, columns, rowCount, exportUrl }`. It is **read-only**
+  (grep-locked: no `prisma.` / `processInbound` in the route).
+- The import screen (`ImportForm.tsx`) gains a second "Google Sheet
+  sync" tab alongside the existing paste-CSV mode: paste link + pick
+  client + (optional) tab → **Fetch & preview** → a preview table +
+  auto-suggested column mapping → **Commit N leads**. Commit is the
+  EXISTING `POST /api/import` (csv + mapping → the "sheets" adapter →
+  `processInbound`), so the commit-after-approve two-step is the ticket's
+  spec §6 shape. The Pabbly note is in the copy: for a page whose only
+  slot is Pabbly's, the sheet is the lead-capture path; the Pabbly
+  webhook (G4/D-06) is the live alternative for a free slot.
+- The `sheetsAdapter` now carries **all** mapped fields (spec §6
+  "upload with column mapping") — `city` + `product` too, so a mapped
+  sheet lands on the right lead fields (a missing key stays null, never
+  a guess). `ingest.ts` already wrote `city` (lead) + `product`
+  (payment); the adapter just now forwards them.
+
+**Idempotency (the guardrail):** re-syncing the same sheet adds 0 new
+leads — the pipeline dedups by phone (E.164) then email (spec §4, within
+a client) and the payment on the gateway txn `import_row_<i>` (spec §6).
+Imported rows are ADDITIVE only: they never touch the Meta pull (the
+ad/adSet/spend fixed point is provably unchanged by this ticket — D-16
+wrote 0 sheet rows to `dev.db` before the commit; the only rows it
+creates are leads/payments/events, gated behind the PO's explicit
+commit).
+
+**Security surface (why [REVIEW]):** the commit path can carry a paid
+row that queues a CAPI `Purchase` (the money path), and this is a new
+public-facing admin screen + a new server-side fetch of an external host.
+Hence ONE `[REVIEW]` commit. No `.env`/`dev.db`/`.next`/scratch in it
+(the `.d16-*` evidence is gitignored; the private-sheet path is recorded
+BLOCKED, not built).
+
+**Verification:** `test/d16.test.ts` **22/22** — `parseSheetLink`
+(link → export URL, tab-gid precedence, the `/pub` form, non-Sheets →
+null), `fetchSheetCsv` (200 CSV in / EMPTY = 0 rows / each of 401·403·
+404 → the EXACT status + the "Google API creds" note / a 200-HTML login
+wall → BLOCKED / a 5xx relayed / a network timeout → httpStatus 0), the
+re-sync **fixed point** (commit → re-commit = 0 new leads, the payments
+deduped on `import_row_*`), the paid-row Purchase-CAPI path, column
+mapping landing on the right fields (unusual header names via the
+mapping, an unmapped status → no payment invented), `suggestColumns`,
+and the route contract (the fetch route is read-only; `POST /api/import`
+stays the commit; the injectable-fetch seam). `pnpm typecheck` 0 ·
+`pnpm build` 0 · full `pnpm test` **267/267 (20 files)**. **Live proof
+(`prod`, `.d16-blocked.json` / `.d16-badlink.json`):** a bogus sheet id
+against real Google → the server-side fetch ran, Google returned `404`,
+the route relayed `upstreamStatus: 404` + the note (BLOCKED, no rows);
+a non-Sheets link → `400 "not a Google Sheets link"`. No cloudflared
+tunnel was running at proof time (the public host was `000`), but the
+fetch targets `docs.google.com`, not the tunnel — so the BLOCKED path
+still proved against live Google.
+
+**Next gate = PO shares a real (or tiny test) Google Sheet as
+"Anyone with the link can view", pastes its link into the new
+`/import` → "Google Sheet sync" tab, Fetch & previews, confirms the
+auto-mapping, commits, and the leads appear in the Lead list (re-sync
+the same sheet = 0 duplicates). The private-sheet / Google-API-creds
+path stays BLOCKED (recorded, separate ticket) until the PO asks for it.**
