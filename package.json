@@ -25,7 +25,8 @@
     "fx:backfill": "tsx scripts/fx-backfill.ts",
     "balance:check": "tsx scripts/balance-check.ts",
     "g3:measure": "tsx scripts/g3-measure.ts",
-    "webhooks:refresh-url": "tsx scripts/refresh-webhook-urls.ts"
+    "webhooks:refresh-url": "tsx scripts/refresh-webhook-urls.ts",
+    "webhooks:clear-unsigned": "tsx scripts/unsigned-flexi.ts"
   },
   "engines": {
     "node": ">=22"

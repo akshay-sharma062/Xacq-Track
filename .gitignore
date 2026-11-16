@@ -99,3 +99,6 @@ pnpm-debug.log*
 
 # D-16 scratch evidence (live BLOCKED-path proof + the 400 non-Sheet case; distilled findings in DECISIONS D-16)
 .d16-*
+
+# D-18 scratch evidence (one-off clear run log; distilled findings in DECISIONS D-18)
+.d18-*

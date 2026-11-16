@@ -1220,3 +1220,100 @@ auto-mapping, commits, and the leads appear in the Lead list (re-sync
 the same sheet = 0 duplicates). The private-sheet / Google-API-creds
 path stays BLOCKED (recorded, separate ticket) until the PO asks for
 it.**
+
+## D-18 — secret-free (unsigned) webhook connections for header-less platforms (2026-11-16) [REVIEW]
+Ticket: FlexiFunnels support confirmed the provider can only POST to a
+bare URL — it CANNOT send a signature / secret header. So the
+per-CONNECTION secret D-13 generated for a FlexiFunnels connection
+(`endpointSecret`, 32 random bytes) can NEVER be echoed back: the
+simple-gateway `verify()` shape is `if (!secret) return true; else
+headers["x-webhook-secret"] === secret`, and a real FlexiFunnels POST
+carries no such header → every event logged "verification failed" (the
+exact PO symptom on the `cl_abhishek-pal-fml`/`flexi` row — 6
+consecutive failed conn logs, last 2026-11-16T12:28:56Z). D-18 makes
+the header-less platforms run UNSIGNED (empty secret) so the PO pastes
+only the inboundUrl. **Security surface (unsigned POST path + admin
+route + one-off data script) → ONE [REVIEW] commit.**
+
+**What landed:**
+- `src/lib/adapters/index.ts` — the single source of truth:
+  `UNSIGNED_ONLY = ["flexifunnels","cosmofeed","tagmango"]` + the
+  `isUnsignedOnly()` type guard (Cosmofeed/TagMango share the same
+  header-less shape; signed gateways like Razorpay/Cashfree are NOT in
+  the set — they keep + verify their secrets).
+- `src/lib/integrations.ts` — `createWebhookEndpoint` now mints
+  `endpointSecret=""` for UNSIGNED_ONLY platforms (returns
+  `unsigned:true`, secret ""); signed platforms unchanged (44-char
+  secret, show-once). New `clearWebhookEndpointSecret(prisma,id)`
+  (empties a header-less connection's leftover secret; GUARDRAIL: a
+  signed-capable platform is refused, `signedPlatform:true`, no write;
+  idempotent) + `clearUnsignedWebhookSecrets(prisma,activeOnly)` (the
+  one-off mass clear: active UNSIGNED_ONLY rows, signed rows skipped,
+  writes only `endpointSecret`).
+- `src/app/api/admin/webhooks/clear-secret/route.ts` — admin-only
+  (`admin_integrations`) POST `{id}` → 404 unknown · 400 a
+  signed-capable platform (the guardrail, before any write) · 200
+  cleared / already-unsigned; an AuditLog row (`clear_webhookEndpointSecret`)
+  is written BEFORE the clear (details = platform + label only, the
+  secret is never logged).
+- `scripts/unsigned-flexi.ts` → `pnpm webhooks:clear-unsigned`
+  (package.json alias) — the one-off run against the live DB (evidence
+  in `.d18-clear-evidence.txt`, gitignored).
+- `src/app/api/admin/webhooks/route.ts` — the create now returns
+  `unsigned:true` + a "plain webhook (no secret)" note for header-less
+  platforms (the ShowOnce warning only on the signed path); the list
+  exposes per-row `unsignedPlatform` + `hasSecret` (a `!= ''` raw
+  check, never the secret value).
+- `IntegrationsPanel.tsx` — an unsigned create shows the inboundUrl-
+  only paste path (no secret reveal); a leftover-secret row gets a
+  "clear secret" button → the new route; the FlexiFunnels card now
+  tells the PO to paste ONLY the inboundUrl (no secret) and flags
+  "leftover secret" vs "unsigned (plain)".
+- `test/d13.test.ts` repoint — the "two connections, each with its own
+  secret" value-prop now demos on Razorpay (a signed-capable platform);
+  FlexiFunnels is unsigned and can't demo two distinct secrets.
+- `test/d18.test.ts` (14 tests): (a) unsigned create → `secret=""` +
+  `unsigned:true` (all 3 header-less platforms; a signed platform
+  still gets a 44-char secret) · (b) `verify()` accepts a plain POST
+  with no secret header when the connection secret is empty · (c)
+  SIGNED platform (Razorpay) still REJECTS a wrong/missing signature —
+  no security regression + not in `UNSIGNED_ONLY` · (d) clear-secret
+  empties the stored secret (idempotent; a signed platform is REFUSED)
+  + the mass clear skips signed rows, idempotently · (e) a re-sent
+  FlexiFunnels POST with the CLEARED connection logs "processed/ok",
+  not "verification failed".
+
+**Verification:** `pnpm typecheck` 0 · `pnpm test` **281/281 (21
+files)** · `pnpm build` 0 (prod stopped, rebuilt, restarted — root
+200) · **live proof (prod):** the broken `cl_abhishek-pal-fml`/`flexi`
+row (`cmwd9nk17000dizs4yj7jz7ks`) had 6 consecutive "verification
+failed" conn logs; `pnpm webhooks:clear-unsigned` → `changed=1`
+(cleared the one leftover secret; a re-run reports `cleared=0
+already=1` — idempotent); a re-sent FlexiFunnels POST → HTTP 200
+`status:"processed"` and the conn log flipped to `ok`; a re-send of
+the identical order does NOT double-charge (gateway-txn dedup: first
+POST `payments:1`, re-send `payments:0`, same lead id) · fixed point
++ WAL re-verified (`journal_mode=wal`; D-18 writes only
+`WebhookEndpoint.endpointSecret`, no Meta ad/adSet/spend row; the
+ticket's `3818/1177/3818` predates D-05 autopull — the current
+baseline is `3857/1190/3857`, untouched by D-18) · no `next dev` next
+to prod · no `.env`/`dev.db`/`.next`/scratch in the commit ·
+**live host re-verified:** the row's stored host
+`andrews-keyword-neighbors-lou.trycloudflare.com` is live (HTTP 200,
+driven a POST through it) while `.env` `PUBLIC_BASE_URL` still points
+at the stale `manhattan-cloth-bestsellers-town` subdomain (`000`) —
+that is the D-15 host-staleness case (re-point via
+`pnpm webhooks:refresh-url` / the D-17 live-host auto-capture), not a
+D-18 regression.
+
+**Commit:** this D-18 commit on `main` (`src/lib/adapters/index.ts` +
+`src/lib/integrations.ts` + `src/app/api/admin/webhooks/{route.ts,
+clear-secret/route.ts}` + `scripts/unsigned-flexi.ts` +
+`package.json` alias + `IntegrationsPanel.tsx` + `test/d13.test.ts`
+repoint + `test/d18.test.ts` + `.gitignore` + the 3 doc files) — local
+only, PO reviews + pushes per the standing rule.
+
+**Next gate = PO drives one real FlexiFunnels order through the
+now-unsigned `cl_abhishek-pal-fml`/`flexi` connection (or FlexiFunnels
+fires its webhook) and it lands `ok` in the connection log — not
+"verification failed".**

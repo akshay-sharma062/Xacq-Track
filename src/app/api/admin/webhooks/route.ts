@@ -16,6 +16,9 @@ import { prisma } from "@/lib/prisma";
 import { gate, resolveClientSet } from "@/lib/api-utils";
 import { createWebhookEndpoint, isPlatform, currentWebhookHost, urlHost } from "@/lib/integrations";
 import { auditAction } from "@/lib/security";
+// D-18: which platforms run unsigned (can't send a secret header) — drives
+// the per-row "clear secret" affordance + the "plain webhook (no secret)" note.
+import { isUnsignedOnly, UNSIGNED_ONLY } from "@/lib/adapters";
 
 export async function GET(req: NextRequest) {
   const g = await gate("admin_integrations");
@@ -46,10 +49,34 @@ export async function GET(req: NextRequest) {
   // exactly what currentWebhookHost resolves.
   const current = await currentWebhookHost(prisma, s.workspaceId);
   const currentHost = urlHost(current.base);
+
+  // D-18: a per-row `hasSecret` boolean (NOT the secret value — the D-13
+  // show-once contract: the list never exposes it). The panel uses it to
+  // offer "clear secret" only on UNSIGNED_ONLY rows that still carry a
+  // leftover (pre-D-18) secret. A raw query so the value itself is never
+  // selected.
+  const idSet = rows.map((r) => r.id);
+  // Guard the empty-set case (`IN ()` is invalid SQL): no rows → no secrets.
+  const withSecret = new Set(
+    idSet.length
+      ? await prisma.$queryRawUnsafe<string[]>(
+          `SELECT id FROM "WebhookEndpoint" WHERE id IN (${idSet.map(() => "?").join(",")}) AND "endpointSecret" != ''`,
+          ...idSet
+        )
+      : []
+  );
   const webhooks = rows.map((r) => {
     const storedHost = urlHost(r.inboundUrl);
     const stale = Boolean(currentHost && storedHost && storedHost !== currentHost && r.active);
-    return { ...r, stale, storedHost, staleHost: stale ? storedHost : undefined };
+    return {
+      ...r,
+      stale,
+      storedHost,
+      staleHost: stale ? storedHost : undefined,
+      // D-18: can this platform run unsigned + does it carry a leftover secret?
+      unsignedPlatform: isUnsignedOnly(r.platform),
+      hasSecret: withSecret.has(r.id),
+    };
   });
 
   return NextResponse.json({
@@ -60,6 +87,9 @@ export async function GET(req: NextRequest) {
     currentBase: current.base,
     currentHost: currentHost ?? null,
     currentBaseSource: current.source,
+    // D-18: the UNSIGNED_ONLY capability set (the panel shows the "no
+    // secret" note for these platforms; a single source of truth).
+    unsignedOnly: [...UNSIGNED_ONLY],
   });
 }
 
@@ -102,6 +132,20 @@ export async function POST(req: NextRequest) {
   }
 
   await auditAction(s, clientId, "create", "webhookEndpoint", created.id, { platform, label });
+
+  // D-18: header-less platforms (flexifunnels/cosmofeed/tagmango — the
+  // UNSIGNED_ONLY capability) get an EMPTY secret: the provider can't send a
+  // secret header, so verify() runs unsigned (plain POST accepted, bounded
+  // by per-conn rate limit + client-id + gateway-txn dedup). Surface that so
+  // the PO stops expecting a secret to paste. Signed platforms keep the
+  // show-once secret (unchanged).
+  if (created.unsigned) {
+    return NextResponse.json({
+      ...created,
+      showOnce: false,
+      note: "Plain webhook (no secret) — this platform can't send one. Paste only the inboundUrl below; every real POST is accepted unsigned (rate-limited + deduped by gateway txn).",
+    });
+  }
 
   // The plain secret is returned EXACTLY ONCE (this body). Never in GET.
   return NextResponse.json({

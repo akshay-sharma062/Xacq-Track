@@ -52,7 +52,13 @@ import {
 // the global prisma singleton (src/lib/prisma.ts → dev.db), which a test must
 // not touch. The audit row is written field-for-field via the isolated temp DB
 // instead; the route-contract asserts below prove the routes wire auditAction.
-import { flexifunnelsAdapter } from "../src/lib/adapters/payments";
+import { flexifunnelsAdapter, razorpayAdapter } from "../src/lib/adapters/payments";
+import { createHmac } from "node:crypto";
+
+/** HMAC-SHA256 hex (mirrors Razorpay's signature: HMAC(secret, rawBody)). */
+function hmacSha256(secret: string, body: string): string {
+  return createHmac("sha256", secret).update(body, "utf8").digest("hex");
+}
 
 const FIT = "cl_upcurvv"; // the tenancy bootstrap client
 const OWNER = "u_owner"; // the tenancy bootstrap user (createdBy FK)
@@ -152,34 +158,40 @@ describe("D-13 WebhookEndpoint — multiple connections per client×platform", (
     await db.close();
   });
 
-  async function twoFlexiConns() {
-    const a = await createWebhookEndpoint(db.prisma, { clientId: FIT, platform: "flexifunnels", label: "d13-ff-accA", createdBy: OWNER });
-    const b = await createWebhookEndpoint(db.prisma, { clientId: FIT, platform: "flexifunnels", label: "d13-ff-accB", createdBy: OWNER });
+  // D-18 repoint: flexifunnels is now in UNSIGNED_ONLY (the header-less
+  // platforms get an EMPTY secret at generation), so it can no longer demo
+  // the SIGNED "two connections, each with its own secret" property. Use a
+  // signed-capable platform (razorpay — the D-13a "two test+prod" case) so
+  // that value-prop stays proven here; D-18 owns the unsigned path.
+  async function twoSignedConns() {
+    const a = await createWebhookEndpoint(db.prisma, { clientId: FIT, platform: "razorpay", label: "d13-rzp-test", createdBy: OWNER });
+    const b = await createWebhookEndpoint(db.prisma, { clientId: FIT, platform: "razorpay", label: "d13-rzp-prod", createdBy: OWNER });
     return { a, b };
   }
 
   it("the (clientId, platform, label) unique allows two connections, each with its OWN distinct secret + inboundUrl", async () => {
-    const { a, b } = await twoFlexiConns();
+    const { a, b } = await twoSignedConns();
     expect(a.id).not.toBe(b.id);
-    expect(a.secret).not.toBe(b.secret); // independent per-connection secrets
+    expect(a.secret).not.toBe(b.secret); // independent per-connection secrets (signed platform)
+    expect(a.unsigned).toBe(false); // a signed platform is NOT in UNSIGNED_ONLY
     // The inboundUrl carries ?client=<client>&conn=<this id> (the PO paste target):
-    expect(a.inboundUrl).toContain("/api/webhooks/flexifunnels");
+    expect(a.inboundUrl).toContain("/api/webhooks/razorpay");
     expect(a.inboundUrl).toContain(`?client=${FIT}&conn=${a.id}`);
     expect(b.inboundUrl).toContain(`&conn=${b.id}`);
     // A duplicate label on the same client×platform is rejected (P2002):
     await expect(
-      createWebhookEndpoint(db.prisma, { clientId: FIT, platform: "flexifunnels", label: "d13-ff-accA", createdBy: OWNER })
+      createWebhookEndpoint(db.prisma, { clientId: FIT, platform: "razorpay", label: "d13-rzp-test", createdBy: OWNER })
     ).rejects.toMatchObject({ code: "P2002" });
   });
 
   it("two connections on the same client×platform verify INDEPENDENTLY: each accepts its own secret header, rejects the sibling's", async () => {
-    const { a, b } = await twoFlexiConns();
-    const sample = flexifunnelsAdapter.sample;
-    const verify = (header: string, connSecret: string) =>
-      (flexifunnelsAdapter.verify as (p: unknown, h: Record<string, string>, s: string | null) => boolean)(
+    const { a, b } = await twoSignedConns();
+    const sample = razorpayAdapter.sample;
+    const verify = (secret: string, connSecret: string) =>
+      (razorpayAdapter.verify as (p: unknown, h: Record<string, string>, s: string | null) => boolean)(
         sample,
-        { "x-webhook-secret": header, rawBody: JSON.stringify(sample) },
-        connSecret
+        { "x-razorpay-signature": hmacSha256(connSecret, JSON.stringify(sample)), rawBody: JSON.stringify(sample) },
+        secret
       );
     // Provider A (secret a.secret) → conn A: accepted; cross-posted to conn B: REJECTED.
     expect(verify(a.secret, a.secret)).toBe(true);
@@ -189,23 +201,23 @@ describe("D-13 WebhookEndpoint — multiple connections per client×platform", (
     expect(verify(b.secret, a.secret)).toBe(false);
     // And the route resolution hands each conn its OWN row's secret (so
     // ?conn=<a.id> verifies against a.secret, ?conn=<b.id> against b.secret):
-    const epA = await resolveEndpointForRoute(db.prisma, a.id, FIT, "flexifunnels");
-    const epB = await resolveEndpointForRoute(db.prisma, b.id, FIT, "flexifunnels");
+    const epA = await resolveEndpointForRoute(db.prisma, a.id, FIT, "razorpay");
+    const epB = await resolveEndpointForRoute(db.prisma, b.id, FIT, "razorpay");
     expect(epA?.endpointSecret).toBe(a.secret);
     expect(epB?.endpointSecret).toBe(b.secret);
   });
 
   it("resolveEndpointForRoute scopes to active + same client + platform (a foreign conn never verifies under this URL)", async () => {
-    const { a } = await twoFlexiConns();
-    expect(await resolveEndpointForRoute(db.prisma, a.id, FIT, "flexifunnels")).not.toBeNull();
+    const { a } = await twoSignedConns();
+    expect(await resolveEndpointForRoute(db.prisma, a.id, FIT, "razorpay")).not.toBeNull();
     // Same conn, wrong platform in the URL:
-    expect(await resolveEndpointForRoute(db.prisma, a.id, FIT, "razorpay")).toBeNull();
+    expect(await resolveEndpointForRoute(db.prisma, a.id, FIT, "flexifunnels")).toBeNull();
     // Same conn, foreign client id:
     const ws = await db.prisma.workspace.findFirstOrThrow();
     await db.prisma.client.create({ data: { id: "cl_d13_b", workspaceId: ws.id, name: "B", currency: "INR" } });
-    expect(await resolveEndpointForRoute(db.prisma, a.id, "cl_d13_b", "flexifunnels")).toBeNull();
+    expect(await resolveEndpointForRoute(db.prisma, a.id, "cl_d13_b", "razorpay")).toBeNull();
     // Unknown conn id:
-    expect(await resolveEndpointForRoute(db.prisma, "does-not-exist", FIT, "flexifunnels")).toBeNull();
+    expect(await resolveEndpointForRoute(db.prisma, "does-not-exist", FIT, "razorpay")).toBeNull();
   });
 
   it("an unknown platform is enforced at write (no row is ever created for it)", async () => {

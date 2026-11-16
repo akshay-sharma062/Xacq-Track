@@ -28,6 +28,10 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { PrismaClient } from "./prisma";
 import { SourcePlatform } from "./types";
 import { urlHost, rehostInboundUrl } from "./webhookUrl";
+// D-18: which platforms CANNOT send a secret header (so their connections are
+// created UNSIGNED — endpointSecret = ""). One-directional import (adapters/
+// index does not import integrations) — no cycle.
+import { isUnsignedOnly } from "./adapters";
 
 // D-15: the two PURE host helpers live in ./webhookUrl (no node:crypto, no
 // Prisma) so the CLIENT integrations panel can import them without dragging
@@ -200,19 +204,27 @@ export function isLoopbackBase(url: string): boolean {
  * (reversible-stored), and the exact inboundUrl the PO pastes into the
  * provider dashboard (…&conn=<this id>). Returns the plain secret ONCE.
  * The base follows D-13a's PUBLIC_BASE_URL precedence (resolveWebhookBase).
+ *
+ * D-18: header-less platforms (UNSIGNED_ONLY = flexifunnels/cosmofeed/
+ * tagmango — the providers that CANNOT send a secret/signature header) are
+ * created UNSIGNED: endpointSecret = "". verify() (if (!secret) return true)
+ * then accepts a plain POST, so the PO just pastes the bare inboundUrl with
+ * no secret. Signed-capable platforms keep a generated per-connection secret
+ * (shown once) — D-18 does NOT loosen those.
  */
 export async function createWebhookEndpoint(prisma: PrismaClient, args: CreateEndpointArgs) {
   if (!isPlatform(args.platform)) {
     throw new Error(`unknown platform '${String(args.platform)}'`);
   }
-  const secret = generateWebhookSecret();
+  const unsigned = isUnsignedOnly(args.platform);
+  const secret = unsigned ? "" : generateWebhookSecret();
   const { base } = resolveWebhookBase(args.baseUrl);
   const row = await prisma.webhookEndpoint.create({
     data: {
       clientId: args.clientId,
       platform: args.platform,
       label: args.label,
-      endpointSecret: secret, // reversible (KMS at G10); shown once, via this return
+      endpointSecret: secret, // unsigned (D-18) = ""; else reversible (KMS at G10); shown once
       // inboundUrl is completed after the id is known (the URL carries &conn=<id>).
       inboundUrl: `${base}/api/webhooks/${args.platform}?client=${args.clientId}&conn=`,
       createdBy: args.createdBy, // required FK -> User (who minted the connection)
@@ -220,7 +232,91 @@ export async function createWebhookEndpoint(prisma: PrismaClient, args: CreateEn
   });
   const inboundUrl = `${base}/api/webhooks/${row.platform}?client=${row.clientId}&conn=${row.id}`;
   await prisma.webhookEndpoint.update({ where: { id: row.id }, data: { inboundUrl } });
-  return { id: row.id, platform: row.platform, label: row.label, clientId: row.clientId, inboundUrl, secret };
+  return {
+    id: row.id, platform: row.platform, label: row.label, clientId: row.clientId,
+    inboundUrl, secret, unsigned,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// D-18 — clear a header-less platform's leftover secret.
+//
+// A connection minted BEFORE D-18 (or by the pre-D-18 generate path) for a
+// UNSIGNED_ONLY platform can carry a non-empty endpointSecret. That secret is
+// useless (the provider can't send it) and actively HARMFUL: verify() then
+// does `headers["x-webhook-secret"] === secret` against an undefined header,
+// so EVERY real POST fails ("verification failed" — the exact PO symptom).
+// This empties it so the connection runs unsigned. GUARDRAIL: only
+// UNSIGNED_ONLY platforms are clearable — a signed platform (razorpay/
+// cashfree) must KEEP its secret or unauthenticated POSTs would pass.
+// Idempotent: clearing an already-unsigned row is a no-op.
+// ---------------------------------------------------------------------------
+export async function clearWebhookEndpointSecret(
+  prisma: PrismaClient,
+  id: string
+): Promise<{ cleared: boolean; alreadyUnsigned?: boolean; signedPlatform?: boolean }> {
+  const ep = await prisma.webhookEndpoint.findUnique({
+    where: { id },
+    select: { id: true, platform: true, endpointSecret: true },
+  });
+  if (!ep) return { cleared: false };
+  // Guardrail: a signed-capable platform is NEVER cleared (security).
+  if (!isUnsignedOnly(ep.platform)) return { cleared: false, signedPlatform: true };
+  if (ep.endpointSecret === "") return { cleared: true, alreadyUnsigned: true };
+  await prisma.webhookEndpoint.update({ where: { id }, data: { endpointSecret: "" } });
+  return { cleared: true };
+}
+
+// ---------------------------------------------------------------------------
+// D-18 — one-off mass-clear for EXISTING active header-less connections.
+//
+// Idempotent: a second run finds every UNSIGNED_ONLY active row already at
+// "" → 0 changes. Only endpointSecret is written; the inboundUrl / conn log
+// / keyHash are untouched. Signed rows are skipped (never cleared).
+// ---------------------------------------------------------------------------
+export interface ClearUnsignedRow {
+  id: string;
+  platform: string;
+  label: string;
+  changed: boolean;
+}
+export interface ClearUnsignedResult {
+  cleared: number; // changed=true count
+  already: number; // already unsigned
+  skippedSigned: number;
+  rows: ClearUnsignedRow[];
+}
+
+export async function clearUnsignedWebhookSecrets(
+  prisma: PrismaClient,
+  activeOnly = true
+): Promise<ClearUnsignedResult> {
+  const rows = await prisma.webhookEndpoint.findMany({
+    where: activeOnly ? { active: true } : {},
+    select: { id: true, platform: true, label: true, active: true, endpointSecret: true },
+    orderBy: { createdAt: "asc" },
+  });
+  let cleared = 0;
+  let already = 0;
+  let skippedSigned = 0;
+  const out: ClearUnsignedRow[] = [];
+  for (const ep of rows) {
+    if (!isUnsignedOnly(ep.platform)) {
+      // Signed-capable platform: keep its secret (the D-18 guardrail).
+      skippedSigned++;
+      out.push({ id: ep.id, platform: ep.platform, label: ep.label, changed: false });
+      continue;
+    }
+    if (ep.endpointSecret === "") {
+      already++;
+      out.push({ id: ep.id, platform: ep.platform, label: ep.label, changed: false });
+      continue;
+    }
+    await prisma.webhookEndpoint.update({ where: { id: ep.id }, data: { endpointSecret: "" } });
+    cleared++;
+    out.push({ id: ep.id, platform: ep.platform, label: ep.label, changed: true });
+  }
+  return { cleared, already, skippedSigned, rows: out };
 }
 
 // ---------------------------------------------------------------------------

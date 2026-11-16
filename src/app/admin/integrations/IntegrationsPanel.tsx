@@ -67,6 +67,12 @@ interface WebhookRow {
   // ACTIVE rows are flagged (a dead connection's URL is audit trail).
   stale?: boolean;
   staleHost?: string;
+  // D-18: the platform can't send a secret header (UNSIGNED_ONLY), and
+  // whether the row still carries a leftover (pre-D-18) secret — NOT the
+  // secret value (the D-13 show-once contract). `hasSecret` drives the
+  // "clear secret" affordance.
+  unsignedPlatform?: boolean;
+  hasSecret?: boolean;
 }
 interface ClientOpt {
   id: string;
@@ -189,9 +195,12 @@ export function IntegrationsPanel({
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [deleteText, setDeleteText] = useState<Record<string, string>>({});
 
-  // One-time reveal state (create response, never re-fetched).
+  // One-time reveal state (create response, never re-fetched). D-18: a
+  // header-less platform (UNSIGNED_ONLY) create has NO secret to reveal —
+  // the response carries `unsigned` + a "plain webhook (no secret)" note,
+  // so we render that instead of the ShowOnce secret block.
   const [newKey, setNewKey] = useState<{ key: string; id: string } | null>(null);
-  const [newHook, setNewHook] = useState<{ secret: string; id: string } | null>(null);
+  const [newHook, setNewHook] = useState<{ secret: string; id: string; unsigned?: boolean; note?: string } | null>(null);
 
   // Per-row connection-log drawer (payload-hash-only, last 100 — the /logs
   // route returns hashes, never the raw payload).
@@ -255,7 +264,10 @@ export function IntegrationsPanel({
       setErr(j.error ?? `error ${r.status}`);
       return;
     }
-    setNewHook({ secret: j.secret, id: j.id });
+    // D-18: an UNSIGNED_ONLY platform's create has no secret (j.secret = "")
+    // and carries `unsigned` + a "plain webhook (no secret)" note instead of
+    // the show-once secret. Forward both so the reveal block can switch.
+    setNewHook({ secret: j.secret ?? "", id: j.id, unsigned: Boolean(j.unsigned), note: j.note });
     setWLabel("");
     load();
   }
@@ -287,6 +299,29 @@ export function IntegrationsPanel({
       return;
     }
     load();
+  }
+
+  /** D-18: "clear secret" — make a header-less (UNSIGNED_ONLY) connection
+   *  unsigned by emptying its leftover endpointSecret. The lib refuses a
+   *  SIGNED platform (clearing it would open an unsigned POST path), so the
+   *  button is offered only on `unsignedPlatform && hasSecret` rows. */
+  async function clearSecret(id: string) {
+    setErr(null);
+    const r = await fetch("/api/admin/webhooks/clear-secret", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      setErr(j.error ?? `error ${r.status}`);
+      return;
+    }
+    // A transient confirmation so the PO sees what just changed, then reload
+    // (the row's hasSecret flips to false on the next list fetch).
+    setErr(j.alreadyUnsigned ? `already unsigned — no secret to clear on '${j.id.slice(0, 8)}…'` : `secret cleared — '${j.id.slice(0, 8)}…' now runs unsigned (plain POST accepted)`);
+    load();
+    setTimeout(() => setErr(null), 6000);
   }
 
   /** D-15: "Refresh URLs" — re-point every ACTIVE connection's inboundUrl to
@@ -572,7 +607,17 @@ export function IntegrationsPanel({
               <h3 style={{ margin: 0 }}>New webhook connection</h3>
               <button className="btn sm" onClick={() => setNewHook(null)}>dismiss</button>
             </div>
-            <ShowOnce value={newHook.secret} kind="webhook" />
+            {newHook.unsigned ? (
+              // D-18: header-less platform — NO secret to paste. The PO copies
+              // only the bare inboundUrl; every real POST is accepted unsigned
+              // (rate-limited + deduped by gateway txn). No ShowOnce block.
+              <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                <span className="badge accent">plain webhook (no secret)</span>
+                <span className="faint" style={{ fontSize: 11 }}>{newHook.note ?? "This platform can't send a secret header — paste only the inboundUrl."}</span>
+              </div>
+            ) : (
+              <ShowOnce value={newHook.secret} kind="webhook" />
+            )}
             <div className="faint" style={{ fontSize: 11, marginTop: 6 }}>
               inboundUrl (copy this into the provider dashboard):{" "}
               <code className="mono" style={{ wordBreak: "break-all" }}>
@@ -628,6 +673,21 @@ export function IntegrationsPanel({
                     <button className="btn sm" style={{ marginRight: 6 }} onClick={() => openLogs(w.id)}>
                       {openLog === w.id ? "hide logs" : "logs"}
                     </button>
+                    {/* D-18: a header-less (UNSIGNED_ONLY) connection that still
+                        carries a leftover pre-D-18 secret can be made unsigned
+                        in one click. Offered ONLY on `unsignedPlatform &&
+                        hasSecret` rows — a signed platform never gets this
+                        (clearing it would open an unsigned POST path). */}
+                    {w.unsignedPlatform && w.hasSecret ? (
+                      <button className="btn sm" style={{ marginRight: 6 }} onClick={() => clearSecret(w.id)}>
+                        clear secret
+                      </button>
+                    ) : null}
+                    {w.unsignedPlatform && !w.hasSecret ? (
+                      <span className="badge accent" style={{ marginRight: 6, fontSize: 10 }} title="This header-less connection runs unsigned (plain POST accepted)">
+                        unsigned
+                      </span>
+                    ) : null}
                     {/* D-15: revoke is now a HARD delete, gated by a
                         type-to-confirm because it's destructive. */}
                     {confirmDelete === w.id ? (
@@ -716,8 +776,8 @@ export function IntegrationsPanel({
 
         {ffHooks.length === 0 ? (
           <div className="empty">
-            no FlexiFunnels connections yet — generate one above (platform = FlexiFunnels) to get its
-            inboundUrl + secret to paste here.
+            no FlexiFunnels connections yet — generate one above (platform = FlexiFunnels). FlexiFunnels
+            can't send a secret header (D-18), so it's created as a PLAIN webhook: paste only the inboundUrl.
           </div>
         ) : (
           <div className="stack" style={{ gap: 14 }}>
@@ -725,12 +785,18 @@ export function IntegrationsPanel({
               <div key={w.id} className="card" style={{ background: "var(--panel-2)" }}>
                 <div className="row spread" style={{ marginBottom: 6 }}>
                   <span className="badge accent">{w.label}</span>
+                  {/* D-18: show the secret state — a leftover secret is the
+                      exact "verification failed" cause and can be cleared in
+                      one click; an unsigned row is the correct resting state. */}
+                  {w.hasSecret
+                    ? <span className="badge warn" style={{ fontSize: 11 }} title="A leftover secret — clear it so this connection runs unsigned">leftover secret</span>
+                    : <span className="badge good" style={{ fontSize: 11 }}>unsigned (plain)</span>}
                   <span className={w.active ? "good" : "bad"} style={{ fontSize: 11 }}>{w.active ? "active" : "revoked"}</span>
                 </div>
                 {/* D-15: copy the CURRENT-host URL (re-hosted against the live
                     host), so the PO always copies a reachable URL even when
-                    the stored one is stale. The secret is what the provider
-                    echoes / signs with (x-webhook-secret). */}
+                    the stored one is stale. D-18: this is the ONLY thing to
+                    paste — FlexiFunnels can't send a secret header. */}
                 <div className="stack" style={{ gap: 4, marginBottom: 8 }}>
                   <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                     <span className="faint" style={{ fontSize: 11 }}>copy (current host):</span>
@@ -745,9 +811,7 @@ export function IntegrationsPanel({
                     <div className="faint" style={{ fontSize: 11 }}>
                       stored: <span className="warn">{w.inboundUrl}</span> (host ≠ current — use the copy above, or "Refresh URLs")
                     </div>
-                  ) : (
-                    <div className="faint" style={{ fontSize: 11 }}>inboundUrl: <code className="mono" style={{ wordBreak: "break-all" }}>{w.inboundUrl}</code></div>
-                  )}
+                  ) : null}
                 </div>
                 <table className="tbl">
                   <thead>
@@ -757,18 +821,22 @@ export function IntegrationsPanel({
                     <tr>
                       <td>Form Settings → Webhooks</td>
                       <td className="faint">(leads)</td>
-                      <td className="mono" style={{ fontSize: 11, wordBreak: "break-all" }}>inboundUrl + x-webhook-secret</td>
+                      <td className="mono" style={{ fontSize: 11, wordBreak: "break-all" }}>inboundUrl <span className="faint">(no secret)</span></td>
                     </tr>
                     <tr>
                       <td>Products → Product Rules → Webhook</td>
                       <td className="faint">(purchases)</td>
-                      <td className="mono" style={{ fontSize: 11, wordBreak: "break-all" }}>inboundUrl + x-webhook-secret</td>
+                      <td className="mono" style={{ fontSize: 11, wordBreak: "break-all" }}>inboundUrl <span className="faint">(no secret)</span></td>
                     </tr>
                   </tbody>
                 </table>
                 <div className="warn" style={{ fontSize: 11, marginTop: 8 }}>
-                  The secret is only in the create response (shown once, above). To surface it here
-                  again for this connection, generate a fresh FlexiFunnels connection and copy it then.
+                  D-18: FlexiFunnels cannot send a signature / secret header, so this connection runs
+                  UNSIGNED — a plain POST is accepted (bounded by per-connection rate limit + client-id +
+                  gateway-txn dedup).{" "}
+                  {w.hasSecret
+                    ? "This row still carries a leftover secret, so real events currently log 'verification failed'. Click the clear-secret button in the table above (or run the one-off script) to fix it without re-generating."
+                    : "Paste only the inboundUrl above."}
                 </div>
               </div>
             ))}
