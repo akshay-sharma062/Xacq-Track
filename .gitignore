@@ -102,3 +102,6 @@ pnpm-debug.log*
 
 # D-18 scratch evidence (one-off clear run log; distilled findings in DECISIONS D-18)
 .d18-*
+
+# D-19/D-19b scratch evidence (backfill run log; distilled findings in DECISIONS D-19)
+.d19-*

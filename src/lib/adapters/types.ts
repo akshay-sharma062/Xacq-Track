@@ -49,6 +49,10 @@ export interface NormalizedInbound {
   upstreamId?: string | null;
   /** When the thing happened; defaults to now. */
   occurredAt?: Date | string;
+  /** D-19: platform-specific custom form fields (FlexiFunnels user-named
+   *  answers, …), carried so no field is lost; persisted on the timeline
+   *  Event's rawPayload (the full webhook body stays on the WebhookLog). */
+  meta?: Record<string, unknown>;
 
   /** The raw payload we parsed from (kept for debugging + re-processing). */
   raw?: unknown;

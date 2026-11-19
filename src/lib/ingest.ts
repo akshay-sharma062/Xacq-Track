@@ -88,29 +88,42 @@ export async function processInbound(ctx: IngestContext): Promise<IngestResult> 
     webhookLogId: "", status: "processed", leadIds: [], events: 0, payments: 0, capiQueued: 0,
   };
 
-  // 3) Process each normalised record in a transaction-per-record so one bad
+  // 3) Log the inbound FIRST (spec 5.6: every webhook logged w/ status +
+  //    retry). Created now — before the record loop — so its id is the
+  //    provenance link every event below carries (Event.webhookLogId, D-19b):
+  //    the lead-view can fall back to parsing the linked raw body when a
+  //    pre-D-19 event has no `meta`. Starts "processed"; the loop's final
+  //    status/error is applied to it afterwards.
+  const log = await prisma.webhookLog.create({
+    data: {
+      clientId, platform,
+      secret: clientSecret ? "shared" : "none",
+      status: "processed",
+      rawPayload: rawBody,
+      eventId: inbounds[0]?.upstreamId ?? null,
+      error: null,
+    },
+  });
+  result.webhookLogId = log.id;
+
+  // 4) Process each normalised record in a transaction-per-record so one bad
   //    row doesn't poison the batch (a 5,000-join spike stays lossless).
   for (const rec of inbounds) {
     try {
-      await processRecord(prisma, clientId, rec, rawBody, result, headers);
+      await processRecord(prisma, clientId, rec, rawBody, result, headers, log.id);
     } catch (e: any) {
       result.status = "failed";
       result.error = e?.message ?? String(e);
     }
   }
 
-  // 4) Log the inbound (spec 5.6: every webhook logged w/ status + retry).
-  const log = await prisma.webhookLog.create({
-    data: {
-      clientId, platform,
-      secret: clientSecret ? "shared" : "none",
-      status: result.status,
-      rawPayload: rawBody,
-      eventId: inbounds[0]?.upstreamId ?? null,
-      error: result.error ?? null,
-    },
-  });
-  result.webhookLogId = log.id;
+  // Reflect the loop's outcome on the log row (a per-record failure flips it).
+  if (result.status !== "processed" || result.error) {
+    await prisma.webhookLog.update({
+      where: { id: log.id },
+      data: { status: result.status, error: result.error ?? null },
+    });
+  }
   return result;
 }
 
@@ -127,7 +140,8 @@ async function processRecord(
   rec: NormalizedInbound,
   rawBody: string,
   result: IngestResult,
-  headers: Record<string, string>
+  headers: Record<string, string>,
+  webhookLogId: string
 ): Promise<void> {
   const phone = normalisePhone(rec.phone);
   const email = normaliseEmail(rec.email);
@@ -289,6 +303,10 @@ async function processRecord(
     gatewayTxnId: rec.gatewayTxnId ?? null,
     product: rec.product ?? null,
     upstreamId: rec.upstreamId ?? null,
+    // D-19: platform-specific custom form fields (FlexiFunnels user-named
+    // answers, …) — the full webhook body stays on the WebhookLog row (spec 4);
+    // this record-level copy is what the timeline / "show payload" view reads.
+    meta: rec.meta ?? null,
     timestamp: when.toISOString(),
   };
   const event = await prisma.event.create({
@@ -300,6 +318,10 @@ async function processRecord(
       currency: rec.currency ?? "INR",
       minutesWatched: rec.minutesWatched ?? null,
       rawPayload: JSON.stringify(eventPayload),
+      // D-19b: the provenance link — the WebhookLog row that produced this
+      // event. The lead-view's "Form data" card reads Event.meta first and
+      // falls back to parsing THIS linked raw body for pre-D-19 events.
+      webhookLogId,
       timestamp: when,
     },
   });

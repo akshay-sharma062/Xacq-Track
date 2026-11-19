@@ -72,11 +72,54 @@ describe("adapters — every platform replays its saved sample (spec 8)", () => 
     expect(started?.type).toBe("checkout_started"); // extractor override wins
   });
 
-  it("FlexiFunnels -> payment_success", () => {
+  it("FlexiFunnels optin (the REAL flat shape, D-19) -> registered with full identity + UTMs", () => {
     const [r] = parseSample("flexifunnels");
+    expect(r?.type).toBe("registered"); // a lead-capture optin, NOT a payment
+    expect(r?.status).toBe("pending");
+    expect(r?.name).toBe("Priya"); // first_name maps to name
+    expect(r?.phone).toBe("+919812340005"); // raw; ingest normalises
+    expect(r?.email).toBe("priya.optin@example.com");
+    expect(r?.city).toBe("Mumbai");
+    // Attribution carry-through (the real optin payload carries all five + fbclid):
+    expect(r?.utmSource).toContain("Foremost Leads");
+    expect(r?.utmCampaign).toBe("Instagram_Reels");
+    expect(r?.utmTerm).toBe("120250090382550032");
+    expect(r?.fbclid).toBe("PAZXh0_EXAMPLE_FBCLID_0001");
+    // A non-payment: no value / gateway txn (no double-counting, no fake
+    // Purchase). `value` is omitted on a registered record (undefined — the
+    // ingest writes `rec.value ?? null`), never a fake 0:
+    expect(r?.value ?? null).toBeNull();
+    expect(r?.gatewayTxnId).toBeUndefined();
+    // D-19: the custom form answer + page context carry through in `meta` (no
+    // field lost); consumed keys are excluded.
+    expect(r?.meta?.["what's_your_current_it"]).toBe("Data Analyst");
+    expect(r?.meta?.utm_id).toBe("120250090379420032"); // not a NormalizedInbound property
+    expect(r?.meta?.utm_flow).toBeUndefined(); // empty value is dropped
+    expect(r?.meta?.phone).toBeUndefined(); // a consumed key is NOT in meta
+    // The IST `datetime` parses (10:53:56 am IST = 05:23:56Z):
+    expect(new Date(r?.occurredAt ?? "").toISOString()).toBe("2026-11-17T05:23:56.000Z");
+  });
+
+  it("FlexiFunnels purchase (tolerant envelope: flat order fields) -> payment_success + txn dedup", () => {
+    const r = adapterFor("flexifunnels").parse({
+      event: "order.paid",
+      order_id: "ff_pay_77",
+      amount: 4999,
+      customer: { email: "v@example.com", phone: "9812340005", name: "Vikram" },
+    })[0];
     expect(r?.type).toBe("payment_success");
+    expect(r?.status).toBe("paid");
     expect(r?.value).toBe(4999);
+    expect(r?.gatewayTxnId).toBe("ff_pay_77"); // dedup key
     expect(r?.email).toBe("v@example.com");
+  });
+
+  it("FlexiFunnels refund -> refund; unrecognised event -> registered (never payment_failed)", () => {
+    const ref = adapterFor("flexifunnels").parse({ event: "order.refunded", order_id: "ff_r1", amount: 4999, customer: { email: "v@example.com", phone: "9812340005" } })[0];
+    expect(ref?.type).toBe("refund");
+    const odd = adapterFor("flexifunnels").parse({ event: "some.unknown.event", email: "x@example.com", phone: "9812340006" })[0];
+    expect(odd?.type).toBe("registered"); // the D-19 default: a Flexi form webhook is a registration
+    expect(odd?.email).toBe("x@example.com");
   });
 
   it("Aevent -> webinar_joined with minutes_watched", () => {

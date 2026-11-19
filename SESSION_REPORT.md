@@ -1317,3 +1317,98 @@ only, PO reviews + pushes per the standing rule.
 now-unsigned `cl_abhishek-pal-fml`/`flexi` connection (or FlexiFunnels
 fires its webhook) and it lands `ok` in the connection log — not
 "verification failed".**
+
+---
+
+## D-19 / D-19b — FlexiFunnels lead-capture (optin) form data: the flat shape, custom fields in a `meta` object, junk-lead backfill + the lead-view "Form data" card (2026-11-17) [REVIEW]
+Ticket: the now-working (D-18 unsigned) `cl_abhishek-pal-fml`/`flexi`
+connection lands `ok`, but the PO's real **lead-capture (optin)** webhooks
+showed up as **"Payment failed" source-unknown leads with no data**. The
+pre-D-19 flexifunnels adapter assumed the D-13/D-06 payment shape
+(`{action:"order.paid", customer:{…}}`); the live-captured payload (read
+off the stored `WebhookLog.rawPayload` rows — spec 4 keeps the raw body)
+is a **FLAT optin object** with `first_name`/`email`/`phone`/`city`,
+user-named custom answers (e.g. `what's_your_current_it`), all 7 UTM
+values, `fbclid`, and `datetime` in IST wall-clock. D-19/D-19b re-models
+the real shape, carries the custom fields losslessly in a record-level
+`meta`, backfills the junk leads the old adapter already created, and
+surfaces the form data on the lead view. **Adapter + one-off data script
++ admin "show payload" + PII-masking surface → ONE [REVIEW] commit.**
+
+**What landed:**
+- `src/lib/adapters/payments.ts` — the flexifunnelsAdapter now models the
+  live optin: optin/lead-capture (and **any unrecognised event** — the
+  D-19 rule: a FlexiFunnels form webhook is a *registration* unless it
+  names a purchase/refund) → a `registered` record with full identity +
+  UTM carry-through + `fbclid`; **never** a fake `payment_failed` /
+  revenue row. Every unmapped top-level key (the user-named custom answers
+  + page context) rides in `meta` (`adapters/types.ts`
+  `NormalizedInbound.meta`) so no field is lost; the full body still
+  stays on the `WebhookLog`. `flexiFormFieldsFromRaw()` is the one
+  flat-shape extractor the adapter + lead-view share. `parseFlexiDatetime`
+  reads the IST `dd/MM/yyyy, hh:mm:ss am/pm` into the right UTC instant.
+  The purchase/refund families still parse (the D-13 shape kept as a
+  **tolerance**; the real purchase envelope is assumed, not live-captured).
+- `src/lib/ingest.ts` — the `WebhookLog` row is created **FIRST** (before
+  the record loop) so every Event carries its `Event.webhookLogId`
+  provenance link (a G0 schema column, now actually written) + the
+  record's `meta` is persisted on the Event's `rawPayload`.
+- `src/lib/leadFormFields.ts` + `src/app/leads/[id]/page.tsx` — the
+  "Form data" card: event-`meta` first (the D-19 path), else the linked
+  `WebhookLog` raw body via the same extractor (pre-D-19 events);
+  identity lines mask per `maskPhone` / new `maskEmail` (spec 5.10
+  last-4); the card hides when nothing is stored (never invented).
+- `src/lib/webhookPayload.ts` +
+  `src/app/api/admin/webhooks/[id]/logs/[logId]/payload` — admin-only
+  (`admin_integrations`) "show payload": renders a stored raw body for one
+  connection-log row, PII-masked to last-4 for roles that must mask
+  (owner/admin see the full value); links the `WebhookConnectionLog` row
+  to its `WebhookLog` by `payloadHash` (SHA-256 — the designed link, no FK
+  between the tables). `IntegrationsPanel.tsx` gains the per-row toggle.
+- `scripts/backfill-flexi.ts` → `pnpm backfill:flexi`
+  (`package.json` alias) — the one-off **additive + idempotent** repair:
+  re-runs the client's flexi `WebhookLog` rows through the new adapter,
+  1:1-matches each junk lead (null phone+email) to its nearest UNUSED
+  lead-capture log within 60 s (two leads never share one log), updates
+  **only** the identity fields + `sourceUnknown=false`. No lead
+  created/deleted, no Meta pull row touched.
+- `test/d19b.test.ts` (16 new tests) + `test/d18.test.ts` repointed to
+  the optin sample + `test/adapters.test.ts` flexi cases.
+
+**Verification:** `pnpm typecheck` 0 · `pnpm build` 0 · full `pnpm test`
+**299/299 (22 files)**. **Backfill live run (2026-11-17):** the 3 junk
+leads created pre-D-19 were backfilled in the earlier session (run 1:
+`junk found=3 → matched=3, updated=3, events-with-meta=3`); re-running
+`pnpm backfill:flexi` this session reports `junk found=0, updated=0`
+(idempotent, run-2 contract held) and the repaired leads now carry real
+identity + `meta` + `webhookLogId` (3 sampled: `stage=Registered`,
+`sourceUnknown=false`, custom field `what's_your_current_it` present in
+`meta`, no backfill-created dupes — the one dup-phone group is the PO's
+own repeated "test" submissions). **Fixed point + WAL held**
+(`ad=3857 / adSet=1190 / spend=3857`, `journal_mode=wal`, G1=
+`cl_upcurvv`) — the backfill writes only Lead/Event identity rows, never
+a Meta pull row. No `next dev` next to prod; no `.env`/`dev.db`/`.next`/
+scratch in the commit; no new `.env` keys.
+
+**Commit:** this D-19 commit on `main` (`src/lib/adapters/{payments.ts,
+types.ts}` + `src/lib/ingest.ts` + `src/lib/leadFormFields.ts` +
+`src/lib/webhookPayload.ts` + `src/app/leads/[id]/page.tsx` +
+`src/app/admin/integrations/IntegrationsPanel.tsx` +
+`src/app/api/admin/webhooks/[id]/logs/[logId]/` +
+`scripts/backfill-flexi.ts` + `package.json` alias + `test/d19b.test.ts`
++ `test/d18.test.ts`/`test/adapters.test.ts` repoint + `.gitignore` + the
+3 doc files) — local only, PO reviews + pushes per the standing rule.
+**The D-17 (tracker) working-tree changes — `prisma/schema.prisma`
+(tracker models + `liveHostSeenAt`), `src/lib/session.ts`
+(`admin_tracker`), and the `public/tracker.js` / `src/app/admin/tracker` /
+`src/app/api/{admin/tracker,tracker}` / `src/lib/{tracker,live-host}.ts`
+untracked files — are a SEPARATE, in-progress ticket and are EXCLUDED
+from this commit.**
+
+**Next gate = PO opens a `cl_abhishek-pal-fml` lead view and sees its
+"Form data" card with the real custom answers + UTM + identity (the 3
+backfilled leads now carry identity, no longer source-unknown); a FRESH
+FlexiFunnels optin that lands `ok` already carries `meta` + `webhookLogId`
+and renders the card from the event-`meta` path — no re-backfill needed.
+Then PO drives the first real FlexiFunnels **purchase** to confirm the
+"assumed" purchase envelope or capture its real shape.**

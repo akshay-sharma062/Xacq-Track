@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useState } from "react";
 import { WebhookBaseSource } from "@/lib/integrations";
 // D-15: the pure host helpers live in @/lib/webhookUrl (no node:crypto, no
 // Prisma) — a value-import from @/lib/integrations would drag node:crypto
@@ -207,6 +207,14 @@ export function IntegrationsPanel({
   const [openLog, setOpenLog] = useState<string | null>(null);
   const [logsFor, setLogsFor] = useState<Record<string, ConnLogRow[]>>({});
 
+  // D-19: "show payload" — the stored raw body for ONE conn-log row, fetched
+  // on demand from the /payload route (admin-only; PII is masked to last-4 for
+  // roles that must mask, per the route's session.maskPhone — owner/admin see
+  // the full value). The raw body already lives on WebhookLog.rawPayload
+  // (spec 4); this is the PO's tool to verify field extraction, so no
+  // separate debug file is needed to see the fields.
+  const [payloadsFor, setPayloadsFor] = useState<Record<string, { found: boolean; masked: boolean; payload?: unknown; note?: string; error?: string }>>({});
+
   // Form state.
   const [kLabel, setKLabel] = useState("");
   const [kPurpose, setKPurpose] = useState("api");
@@ -377,6 +385,25 @@ export function IntegrationsPanel({
     }
     setLogsFor((m) => ({ ...m, [id]: j.logs ?? [] }));
     setOpenLog(id);
+  }
+
+  /** D-19: "show payload" — fetch the stored raw body for ONE conn-log row.
+   *  The /payload route is admin-only + PII-masked for roles that must mask
+   *  (owner/admin see the full value). Rendered on demand, not pre-fetched,
+   *  so the last-100 list stays hash-only unless a row is expanded. */
+  async function showPayload(endpointId: string, logId: string) {
+    if (payloadsFor[logId]) return; // already fetched — the row just re-renders
+    setPayloadsFor((m) => ({ ...m, [logId]: { found: false, masked: false, payload: undefined, note: "loading…" } }));
+    const r = await fetch(`/api/admin/webhooks/${endpointId}/logs/${logId}/payload`);
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      setPayloadsFor((m) => ({ ...m, [logId]: { found: false, masked: false, error: j.error ?? `error ${r.status}` } }));
+      return;
+    }
+    setPayloadsFor((m) => ({
+      ...m,
+      [logId]: { found: Boolean(j.found), masked: Boolean(j.masked), payload: j.payload, note: j.note },
+    }));
   }
 
   // The FlexiFunnels quick-action: for each active flexifunnels connection,
@@ -745,21 +772,70 @@ export function IntegrationsPanel({
                     <th>Status</th>
                     <th>Payload SHA-256</th>
                     <th>Error</th>
+                    <th></th>
                   </tr>
                 </thead>
                 <tbody>
-                  {logsFor[openLog].map((l) => (
-                    <tr key={l.id}>
-                      <td className="faint" style={{ fontSize: 12 }}>{fmtTs(l.receivedAt)}</td>
-                      <td>
-                        <span className={`badge ${l.status === "ok" ? "good" : l.status === "duplicate" ? "warn" : "bad"}`}>
-                          {l.status}
-                        </span>
-                      </td>
-                      <td className="mono" style={{ fontSize: 10, wordBreak: "break-all" }}>{l.payloadHash}</td>
-                      <td className="faint" style={{ fontSize: 11, wordBreak: "break-word" }}>{l.error ?? ""}</td>
-                    </tr>
-                  ))}
+                  {logsFor[openLog].map((l) => {
+                    const payload = payloadsFor[l.id];
+                    const expanded = Boolean(payload);
+                    return (
+                      <Fragment key={l.id}>
+                        <tr>
+                          <td className="faint" style={{ fontSize: 12 }}>{fmtTs(l.receivedAt)}</td>
+                          <td>
+                            <span className={`badge ${l.status === "ok" ? "good" : l.status === "duplicate" ? "warn" : "bad"}`}>
+                              {l.status}
+                            </span>
+                          </td>
+                          <td className="mono" style={{ fontSize: 10, wordBreak: "break-all" }}>{l.payloadHash}</td>
+                          <td className="faint" style={{ fontSize: 11, wordBreak: "break-word" }}>{l.error ?? ""}</td>
+                          <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                            <button className="btn sm" onClick={() => showPayload(openLog, l.id)}>
+                              {expanded ? "hide payload" : "show payload"}
+                            </button>
+                          </td>
+                        </tr>
+                        {expanded ? (
+                          <tr>
+                            <td colSpan={5} style={{ background: "var(--panel-2)" }}>
+                              {payload?.error ? (
+                                <span className="bad" style={{ fontSize: 11 }}>{payload.error}</span>
+                              ) : payload?.note === "loading…" ? (
+                                <span className="faint" style={{ fontSize: 11 }}>loading…</span>
+                              ) : !payload?.found ? (
+                                <span className="faint" style={{ fontSize: 11 }}>
+                                  {payload?.note ?? "raw payload not retained for this event."}
+                                </span>
+                              ) : (
+                                <div className="stack" style={{ gap: 4 }}>
+                                  {payload.masked ? (
+                                    <span className="badge warn" style={{ fontSize: 10, alignSelf: "flex-start" }}>
+                                      PII masked (your role sees phone/email last-4)
+                                    </span>
+                                  ) : null}
+                                  <pre className="mono" style={{
+                                    fontSize: 10,
+                                    margin: 0,
+                                    padding: 8,
+                                    background: "var(--panel)",
+                                    border: "1px solid var(--border, rgba(255,255,255,0.08))",
+                                    borderRadius: 6,
+                                    whiteSpace: "pre-wrap",
+                                    wordBreak: "break-word",
+                                    maxHeight: 320,
+                                    overflow: "auto",
+                                  }}>
+                                    {JSON.stringify(payload.payload, null, 2)}
+                                  </pre>
+                                </div>
+                              )}
+                            </td>
+                          </tr>
+                        ) : null}
+                      </Fragment>
+                    );
+                  })}
                 </tbody>
               </table>
             )}

@@ -213,7 +213,15 @@ describe("D-18 (e) — a re-sent FlexiFunnels POST with the CLEARED connection l
     expect(after.status).toBe("processed");
     expect(after.error).toBeUndefined();
     expect(mapConnStatus(after.status)).toBe("ok"); // ← 'processed/ok', not 'verification failed'
-    // A real payment actually landed through the unsigned path:
-    expect(after.payments).toBe(1);
+    // D-19 repoint: the shared flexifunnels sample is now the REAL optin
+    // lead-capture shape (a registration, NOT a payment), so a real LEAD lands
+    // through the unsigned path with full identity (0 payments, 1 event, 1 lead).
+    expect(after.payments).toBe(0);
+    expect(after.events).toBe(1);
+    expect(after.leadIds).toHaveLength(1);
+    const lead = await db.prisma.lead.findFirst({ where: { id: after.leadIds[0] } });
+    expect(lead?.phone).toBe("+919812340005"); // raw value the adapter hands through
+    expect(lead?.email).toBe("priya.optin@example.com");
+    expect(lead?.name).toBe("Priya");
   });
 });
