@@ -31,7 +31,13 @@ import { maskPhone, Session } from "../src/lib/session";
 // House style (D-12 precedent): route/page contracts are pinned as source
 // asserts against the exact files, so a regression that renders a secret or
 // drops the acting-user fields breaks the suite.
-const PAGE = readFileSync("src/app/page.tsx", "utf8");
+// D-20: the client-profile band + all-clients summary render layer moved from
+// page.tsx into components/DashboardBody.tsx (a "use client" wrapper). Both
+// files together are the dashboard surface, so the source-pinned assertions
+// (rendered fields + "no secret column" guardrail) cover the concatenation.
+const PAGE =
+  readFileSync("src/app/page.tsx", "utf8") +
+  readFileSync("src/app/components/DashboardBody.tsx", "utf8");
 const TOPBAR = readFileSync("src/app/components/Topbar.tsx", "utf8");
 const SESSION_ROUTE = readFileSync("src/app/api/session/route.ts", "utf8");
 // The clientProfile FUNCTION body (from its signature to EOF) — the

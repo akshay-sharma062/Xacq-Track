@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Script from "next/script";
 import "./globals.css";
 import { Sidebar } from "./components/Sidebar";
 import { prisma } from "@/lib/prisma";
@@ -23,6 +24,15 @@ export default async function RootLayout({ children }: { children: React.ReactNo
   return (
     <html lang="en">
       <body>
+        {/* D-20: Chart.js v4.5.0 UMD — loaded once in the app shell (before any "use client"
+            dashboard component mounts), with SRI verification. */}
+
+        <Script
+          src="https://cdn.jsdelivr.net/npm/chart.js@4.5.0/dist/chart.umd.min.js"
+          integrity="sha384-XcdcwHqIPULERb2yDEM4R0XaQKU3YnDsrTmjACBZyfdVVqjh6xQ4/DCMd7XLcA6"
+          crossOrigin="anonymous"
+          strategy="beforeInteractive"
+        />
         <div className="app">
           <Sidebar workspace={workspace} />
           <main className="main">{children}</main>

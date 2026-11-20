@@ -65,7 +65,7 @@ export interface DashboardData {
   funnel: Awaited<ReturnType<typeof funnelReport>>;
   mix: Awaited<ReturnType<typeof sourceMix>>;
   topAds: Awaited<ReturnType<typeof adPerformance>>;
-  spendByDay: { label: string; value: number }[];
+  spendByDay: { date: string; value: number }[];
   /** D-04: every ad account of the client with its spend/campaign/ads totals. */
   accounts: AccountSummary[];
   counts: {
@@ -144,7 +144,7 @@ export async function dashboardFor(
   for (const r of spendRows) byDay.set(r.day, (byDay.get(r.day) ?? 0) + (r.inrSpend ?? 0));
   const spendByDay = [...byDay.entries()]
     .sort((a, b) => (a[0] < b[0] ? -1 : 1))
-    .map(([d, v]) => ({ label: d.slice(5), value: Math.round(v) }));
+    .map(([d, v]) => ({ date: d.slice(5), value: Math.round(v) }));
 
   const stage = (name: string) => leads.filter((l) => l.stage === name).length;
 
@@ -265,7 +265,7 @@ export interface AllDashboard {
   };
   accounts: AccountSummary[]; // every ad account across the visible clients
   perClient: PerClientRow[]; // §1: the per-client breakdown table
-  spendByDay: { label: string; value: number }[];
+  spendByDay: { date: string; value: number }[];
   topCampaigns: { campaign: string; account: string; spendInr: number }[];
   topAds: AdPerfRow[]; // spend-ranked across all accounts
   /** D-10: per-ad-set metrics (name/campaign, spend native+INR, impressions,
@@ -376,7 +376,7 @@ export async function dashboardAll(
   }));
   const spendByDay = [...byDay.entries()]
     .sort((a, b) => (a[0] < b[0] ? -1 : 1))
-    .map(([d, v]) => ({ label: d.slice(5), value: Math.round(v) }));
+    .map(([d, v]) => ({ date: d.slice(5), value: Math.round(v) }));
 
   // -- LEADS family: sum the additive counters across the visible set (0 = the
   //    honest pre-G3/G4 empty state; the UI labels it, we never invent numbers).

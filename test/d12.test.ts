@@ -151,8 +151,11 @@ describe("D-12 engagement KPIs — stored Spend rows only, exact CTR/CPC math", 
       expect(bad, `unexpected KPI field '${bad}'`).not.toBe(Object.keys(d.kpi).join(","));
       expect(bad, `unexpected engagement field '${bad}'`).not.toBe(Object.keys(d.kpi.engagement).join(","));
     }
-    // The dashboard page renders the footnote (never a zero column):
-    const page = readFileSync("src/app/page.tsx", "utf8");
+    // The dashboard page renders the footnote (never a zero column).
+    // D-20: the visual layer moved to DashboardBody.tsx; the footnote +
+    // engagement labels live there now, so check both files.
+    const page = readFileSync("src/app/page.tsx", "utf8")
+      + readFileSync("src/app/components/DashboardBody.tsx", "utf8");
     expect(page).toMatch(/LPV\/CLPV not available on this Meta API version/i);
     expect(page).toMatch(/400/);
     // …and the engagement KPI row itself:
