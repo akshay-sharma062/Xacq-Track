@@ -1412,3 +1412,100 @@ FlexiFunnels optin that lands `ok` already carries `meta` + `webhookLogId`
 and renders the card from the event-`meta` path — no re-backfill needed.
 Then PO drives the first real FlexiFunnels **purchase** to confirm the
 "assumed" purchase envelope or capture its real shape.**
+
+---
+
+## D-17 — Device Track: the visitor-tracker MVP merged + the "Device Track" tab (2026-11-19) [REVIEW]
+
+**The task (from the PO):** merge the external `visitor-tracker-mvp`
+(Cloudflare Workers: `projects`/`visits` + `/collect` + `tracker.js` + the
+admin API + `admin.html`) into Xacq-Track and add a **"Device Track" tab**
+that shows the analytics **for all clients** and is **filterable**.
+
+**What was already in the working tree (the prior-session D-17 port,
+uncommitted):** the 4 Prisma models (`TrackingProject` / `TrackedVisitor` /
+`VisitorEvent` / `VisitorSession`, already `db push`ed to `dev.db`), the
+`src/lib/tracker.ts` data layer, `public/tracker.js` (pageviews only), the
+public `/api/tracker/ingest`, the admin `/api/admin/tracker/*` routes, and
+the `TrackerDash.tsx` dashboard component. What this build ADDED:
+
+- **Schema (additive):** `TrackingProject.clientId` (nullable — the
+  "filter by client" axis) + `Client.trackingProjects` back-relation;
+  `VisitorEvent.eventType` ("pageview" | "lead") + `leadSource`
+  ("thankyou" | "submit" | "click" | "ajaxSuccess" | "manual") + a
+  `(projectId, eventType)` index. `db push` applied; the fixed point
+  `ad=3857 / adSet=1190 / spend=3857, G1=cl_upcurvv, journal_mode=wal`
+  re-verified before/after.
+- **Data layer (`src/lib/tracker.ts`):** the dedup key now includes the
+  event kind (a pageview + a lead in the same instant both land; a replay
+  of either is a no-op); `totalPageViews` counts pageviews only;
+  `trackerDashboard` gained `totalLeads` / `todayLeads` / `conversionRate`
+  (= totalLeads / uniqueVisitors, 0 when no visitors — never a fake
+  ratio) + `recentLeads` (the last 50 lead events, newest first);
+  `workspaceProjectIds(workspaceId, clientId?)` client-narrowing;
+  `createTrackingProject` accepts a `clientId`; `trackerProjectSummaries`
+  returns the owning client name.
+- **Lead capture in `public/tracker.js` (full MVP parity):** a thank-you
+  page (path detection or a `data-event-type="lead"` attr) fires ONE lead
+  beacon per session (a refresh sends a pageview instead — the MVP's exact
+  behaviour); a landing page fires pageview + form-interception hooks
+  (DOM `submit` capture + FlexiFunnels submit-button clicks + jQuery
+  `ajaxSuccess` on the `contact_submission` / `lead` / `form` /
+  `admin-ajax` URLs) → a `lead` beacon with the capture source; `window.
+  VisitorTracker.trackLead()/trackPageView()` stay. The cookie/storage
+  keys are PROJECT-SCOPED (`trk_vid_<projectId>` etc.) — the prior port's
+  global keys would clobber each other on a multi-project page (0 stored
+  rows, safe to change).
+- **The "Device Track" tab (`src/app/device-track/`):** a new Sidebar entry
+  (the Admin section, `/device-track`), a server page gated by
+  `can(s, "admin_tracker")` (owner/admin — hidden for non-admins, the API
+  layer enforces it too), and `DeviceTrackPanel` (the project-management
+  strip: list / create-with-client / enable-disable / the `?project=`
+  drill-down) reusing `TrackerDash` (extended with a `client` prop — the
+  Topbar's `?client=` switcher IS the "filter by client"; it forwards into
+  the overview/visitors/IP/export fetches — + the lead KPI cards + the
+  "Recent leads (last 50)" table). The admin API routes
+  (`overview`/`visitors`/`ip`/`export`) accept an optional `?client=`
+  (narrows to that client's projects; an unassigned project is all-clients
+  only); `[projectId]` returns the owning client name (display-only).
+- **The live-host self-capture wired up (was written but unused):**
+  `/api/tracker/ingest` now fires `void noteLiveHost(req)` on every visit
+  (the Host header self-captures into `Workspace.liveHost` — idempotent,
+  localhost-guarded, stale-clobber-guarded, fire-and-forget); the tracker
+  admin routes build the install snippet with `currentPublicBase()`
+  (Workspace.liveHost, if fresh <24 h > `.env` tiers > localhost-dev), NOT
+  the stale `.env` value — this fixes the recurring "FlexiFunnels says
+  incorrect URL" bug on a cloudflared rotation. A G10 Vercel swap needs no
+  code change (set `PUBLIC_BASE_URL`, or let the capture family-match the
+  configured host).
+
+**Deliberately NOT ported (recorded in DECISIONS D-17):** the Workers
+`/api/login` password + `SESSION_SECRET` auth + `admin.html` (Xacq-Track
+has its cookie session + the `admin_tracker` gate + a React UI), and the
+per-project `allowed_origin` check (project ids are unguessable cuids + a
+per-project rate limit; an optional hardening follow-up).
+
+**Tests:** `test/tracker.test.ts` — 13/13 green: `clientIpFromHeaders`
+priority, `maskIp` per role, the ingest unknown/inactive/replay/
+lead-pageview-both-land cases, the client-narrowing, the lead KPIs +
+conversion rate (including the 0-when-no-visitors case), `pickPublicBase`
+precedence (fresh / stale / no .env), and the `noteLiveHost`
+idempotency + localhost guards (DB-backed, against the TEMP test DB —
+one test initially omitted the `prisma` param and overwrote the LIVE
+`dev.db` `liveHost` row; fixed + restored to its pre-test value).
+Full suite green; `typecheck` 0; `build` exit 0. No `next dev` next to
+prod (prod `next start` stopped for the `prisma generate`, restarted
+after the build); no `.env`/`dev.db`/`.next`/scratch in the commit.
+
+**Commit:** ONE `[REVIEW]` commit (schema + data layer + the ingest /
+admin security surface + `tracker.js` lead capture + the Device Track
+screen + the live-host wiring + 13 tests + the 3 doc files) — local only,
+the PO reviews + pushes per the standing rule.
+
+**Next gate = PO creates a tracking project in the "Device Track" tab
+(picking a client), pastes the generated install snippet into a live
+FlexiFunnels landing page's custom-JS slot, and drives one real visit +
+one form submit → the first device/lead rows appear in the tab
+(the install snippet's host is the SELF-CAPTURED live host, not a stale
+`.env` value); the `conversionRate` + "Recent leads" reflect the
+submit.**

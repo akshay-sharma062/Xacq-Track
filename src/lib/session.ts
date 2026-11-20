@@ -115,11 +115,16 @@ export type Action =
   // client×platform; hash-only key storage; one-time secret reveal).
   // SECURITY SURFACE — owner + admin only; no other role may mint keys or
   // webhook connections.
-  | "admin_integrations";
+  | "admin_integrations"
+  // D-17: manage the Visitor Tracking & Analytics module (create tracking
+  // projects, read the visitor/IP analytics, export). SECURITY SURFACE —
+  // owner + admin only; the public /api/tracker/ingest is NOT admin-gated
+  // (it's the tracker script's public endpoint), the ADMIN screens are.
+  | "admin_tracker";
 
 const MATRIX: Record<Role, Action[]> = {
-  owner: ["view", "view_phone", "export", "assign_lead", "move_stage", "add_note", "add_task", "merge_duplicate", "send_capi", "pull_meta", "edit_settings", "delete_lead", "admin_integrations"],
-  admin: ["view", "view_phone", "export", "assign_lead", "move_stage", "add_note", "add_task", "merge_duplicate", "send_capi", "pull_meta", "edit_settings", "delete_lead", "admin_integrations"],
+  owner: ["view", "view_phone", "export", "assign_lead", "move_stage", "add_note", "add_task", "merge_duplicate", "send_capi", "pull_meta", "edit_settings", "delete_lead", "admin_integrations", "admin_tracker"],
+  admin: ["view", "view_phone", "export", "assign_lead", "move_stage", "add_note", "add_task", "merge_duplicate", "send_capi", "pull_meta", "edit_settings", "delete_lead", "admin_integrations", "admin_tracker"],
   media_buyer: ["view", "export", "send_capi", "pull_meta"],
   sales_rep: ["view", "view_phone", "assign_lead", "move_stage", "add_note", "add_task", "merge_duplicate"],
   viewer: ["view"], // read-only (client portal default, spec 5.10)

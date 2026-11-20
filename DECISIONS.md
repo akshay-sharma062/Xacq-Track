@@ -1558,3 +1558,82 @@ FlexiFunnels optin that lands `ok` already carries `meta` + `webhookLogId`
 and renders the card from the event-`meta` path — no re-backfill needed.
 Then PO drives the first real FlexiFunnels **purchase** to confirm the
 "assumed" purchase envelope (D-19) or capture its real shape.**
+
+---
+
+## D-17 — Device Track: the visitor-tracker MVP merged + a Device Track tab (2026-11-19)
+
+**What landed:** the external `visitor-tracker-mvp` (a Cloudflare Workers
+app: `projects`/`visits` tables, a public `/collect` + `tracker.js`, a
+password-gated admin API + `admin.html`) was merged into Xacq-Track as a
+first-party module (already 90% ported by a prior session as the D-17 data
+layer + `public/tracker.js` + public `/api/tracker/ingest` + the admin
+tracker API routes + `TrackerDash.tsx`, uncommitted in the working tree) —
+and this build FINISHES it: a new **"Device Track" nav tab**
+(`src/app/device-track/`, admin-only) that shows the analytics **across all
+clients** and is filterable **by client** (the Topbar's existing `?client=`
+switcher) and **by tracking project** (`?project=`).
+
+**MVP → Prisma mapping (additive: 4 new tables, 2 new columns, no re-parents):**
+
+| MVP (Workers) | Xacq-Track | note |
+|---|---|---|
+| `projects.allowed_origin` + per-project origin check | `TrackingProject.clientId` + a workspace-scoped `admin_tracker` gate | **the origin check was deliberately NOT ported**: a tracking project id is an unguessable cuid + per-project rate limit bounds abuse; a per-project allowed_origin can be added later without touching the ingest path (recorded as the optional hardening follow-up) |
+| `visits.event_type` ("pageview" | `VisitorEvent.eventType` | added this build; "pageview" \| "lead" is part of the dedup key — a pageview + a lead in the same instant both land, a replay of either is a no-op |
+| — | `VisitorEvent.leadSource` | WHERE the lead was captured: "thankyou" \| "submit" \| "click" \| "ajaxSuccess" \| "manual" |
+| `total_leads` / `conversion_rate` / `recent_leads` | `trackerDashboard.totalLeads` / `conversionRate` / `recentLeads` | same math (totalLeads / uniqueVisitors, 0 when no visitors — never a fake ratio); the "Total Page Views" card now counts pageview events only |
+| `tracker.js` lead hooks (thank-you + DOM submit + FlexiFunnels click + jQuery `ajaxSuccess` + `window.VisitorTracker`) | `public/tracker.js` D-17.1 | **full MVP parity**; keys are PROJECT-SCOPED (`trk_vid_<projectId>` etc.) — the prior port's global keys would clobber each other on a multi-project page (0 stored rows, safe to change) |
+| Cloudflare's `request.cf.country/…` geo | `geoLookupNone` (offline seam, "unknown") | no GeoLite2 DB shipped (no maxmind dep); the IP is kept so a drop-in upgrades it without touching the ingest path |
+| `/api/login` (password + `SESSION_SECRET` HMAC token) + `admin.html` | NOT ported | Xacq-Track already has its cookie-session + `can(s, "admin_tracker")` (owner/admin) auth; an `admin.html` in a Next.js app would be dead weight |
+
+**Live-host self-capture (the "FlexiFunnels says incorrect URL" bug):**
+`src/lib/live-host.ts` was written but wired nowhere before this build —
+every install snippet resolved the `.env` `PUBLIC_BASE_URL`, which STALES on
+every cloudflared restart (the subdomain rotates). Now: the public
+`/api/tracker/ingest` fires `void noteLiveHost(req)` on every visit (the
+Host header self-captures into `Workspace.liveHost`, idempotent,
+localhost-guarded, stale-clobber-guarded, fire-and-forget — never blocks
+the request or writes on a dev-time localhost Host); the tracker admin
+routes (create + per-project) build the install snippet with
+`currentPublicBase()` (Workspace.liveHost, if fresh <24 h > the `.env` tiers
+> the localhost-dev fallback), NOT a hardcoded `.env` value. A G10 swap to a
+Vercel domain needs no code change: set `PUBLIC_BASE_URL`, or let the
+capture family-match the configured host.
+
+**The Device Track screen:** `src/app/device-track/page.tsx` (a server
+component gated by `can(s, "admin_tracker")`, hidden for non-admins — the
+API layer enforces it too) + `DeviceTrackPanel.tsx` (the project-management
+strip: list/create/enable-disable + the `?project=` drill-down) reusing the
+existing `TrackerDash.tsx` dashboard (extended with the lead KPIs — Leads
+total / Today's / conversion-rate cards + the "Recent leads (last 50)"
+table — and a `client` prop forwarding the Topbar's `?client=` into the
+overview/visitors/ip/export fetches). The admin API routes
+(`/api/admin/tracker/overview|visitors|ip|export`) accept an optional
+`?client=` (the "filter by client" axis) that narrows the workspace's
+projects to that client's (an unassigned project — `clientId null` — is
+all-clients only, never under a specific client); `[projectId]` returns the
+project's owning client name (display-only). No new role / permission —
+the D-17 `admin_tracker` action from the prior session (owner/admin only,
+`src/lib/session.ts`).
+
+**Guardrails honoured:** ADDITIVE schema only (`db push` applied to `dev.db`
+additively; the fixed point `ad=3857 / adSet=1190 / spend=3857,
+G1=cl_upcurvv, journal_mode=wal` re-verified after the push — no pull row
+touched, no deletes/re-parents); no `next dev` next to prod (prod
+`next start` stopped for the `prisma generate`, restarted after the
+build); no `.env` changes, no `dev.db`/`.next`/scratch in the commit; the
+public ingest keeps its D-17 security model (the IP is SERVER-captured —
+`cf-connecting-ip` first, a client-sent `ip` field is ignored — never
+trusted; no PII in the response, only the event id). One known test bug
+fixed during this build: `test/tracker.test.ts`'s `noteLiveHost` tests
+initially omitted the `prisma` param, which defaulted to the LIVE `dev.db`
+client (overwriting its `liveHost` row with a test value) — the test now
+passes `prisma: p` (the temp test DB) and the `dev.db` `liveHost` was
+restored to its pre-test value.
+
+**Next gate = PO creates a tracking project in Device Track (picking a
+client), pastes the generated install snippet into a live FlexiFunnels
+landing page's custom-JS slot, and drives one real visit + one form
+submit → the first device/lead rows appear in the tab (the install
+snippet's host is the SELF-CAPTURED live host, not a stale `.env` value);
+the `conversionRate` + "Recent leads" reflect the form submit.**

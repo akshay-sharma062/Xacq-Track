@@ -39,6 +39,14 @@ model Workspace {
   // "Refresh URLs" action (a subdomain rotation is a PO event, never a
   // background write). Falls back to PUBLIC_BASE_URL when unset.
   liveHost String?
+  // D-17: when liveHost was last SEEN live. The capture helper (src/lib/
+  // live-host.ts) stamps it on every inbound request that arrives over the
+  // tunnel (Host header = *.trycloudflare.com), so the host self-updates on
+  // a cloudflared rotation — no more daily manual refresh. A stale capture
+  // (an older timestamp) never clobbers a fresher liveHost (compare before
+  // write). currentPublicBase() only TRUSTS liveHost while it is fresh
+  // (<24h old, or a pre-D-17 row with no stamp — those were PO-persisted).
+  liveHostSeenAt DateTime?
 
   clients  Client[]
   users    User[]
@@ -83,6 +91,10 @@ model Client {
   // D-13: multiple webhook connections + API keys (see the models below).
   apiKeys       ApiKey[]
   webhookEndpoints WebhookEndpoint[]
+
+  // D-17 / Device Track: the client's tracking projects (a landing page being
+  // tracked; nullable on TrackingProject — an unassigned project is valid).
+  trackingProjects TrackingProject[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -551,6 +563,9 @@ model User {
   apiKeysCreated       ApiKey[]
   webhookEndpointsCreated WebhookEndpoint[]
 
+  // D-17: tracker projects this user created (the tracker admin is workspace-scoped).
+  trackingProjectsCreated TrackingProject[]
+
   createdAt DateTime @default(now())
 }
 
@@ -794,4 +809,137 @@ model WebhookConnectionLog {
 
   @@index([endpointId])
   @@index([receivedAt])
+}
+
+// ---------------------------------------------------------------------------
+// D-17 — Visitor Tracking & Analytics (a NEW, self-contained module.
+// Additive: 4 new tables, no column drops, no re-parents, no pull-row
+// changes — the Meta ad/adSet/spend fixed point is untouched by design.
+//
+// It deliberately does NOT touch the xt.js / /api/ingest pipeline: the
+// tracker is its own first-party module with its own tables, its own
+// tracker.js script, its own public /api/tracker/ingest, and its own
+// admin screens. The existing `Visitor`/`Touchpoint` models stay the
+// client-scoped ad-touchpoint trail; these are the per-PROJECT tracker
+// views (device/browser/os/screen/ip + UTM) for FlexiFunnels landing
+// pages.
+//
+// Security (spec §10 / Phase 5): the tracker.js script carries ONLY a
+// public projectId + public base URL (no secret/token/service-role key);
+// the IP is captured SERVER-side (cf-connecting-ip → x-real-ip →
+// x-forwarded-for → remoteAddr) and never trusted from the client; the
+// admin screens gate on the `admin_tracker` action (owner/admin); IP
+// display is masked to the last octet for non-owner/admin roles.
+// ---------------------------------------------------------------------------
+
+// D-17: a tracking project = one landing page the PO wants visitor
+// analytics for (per-project scoping is the module's whole point).
+model TrackingProject {
+  id          String @id @default(cuid())
+  workspaceId String
+  name        String // "Project Name"
+  landingPageName String // "Landing Page Name"
+  landingPageUrl  String // the actual URL being tracked
+  description String?
+  status      String @default("active") // "active" | "inactive"
+  createdBy   String
+  created     User @relation(fields: [createdBy], references: [id])
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  visitorIds  TrackedVisitor[]
+  events      VisitorEvent[]
+  sessions    VisitorSession[]
+
+  // Device Track: the client whose landing page this project tracks (the
+  // all-clients ↔ one-client filter axis). NULL = unassigned (a project
+  // created before the column, or tracked without a client link) — valid.
+  clientId    String?
+  client      Client?  @relation(fields: [clientId], references: [id])
+
+  @@unique([workspaceId, name])
+  @@index([workspaceId])
+  @@index([clientId])
+}
+
+// D-17: one DISTINCT tracked visitor (a first-party cookie value) per
+// project. The aggregate survives retention (the raw VisitorEvent rows
+// prune; this row does not — it is the "unique visitor" count).
+model TrackedVisitor {
+  id          String @id @default(cuid())
+  projectId   String
+  project     TrackingProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  visitorId   String @unique // the first-party cookie value
+  firstSeen   DateTime @default(now())
+  lastSeen    DateTime
+  totalVisits Int @default(1)
+
+  @@index([projectId])
+  @@index([visitorId])
+}
+
+// D-17: one page-visit event for a project. `ip` is SERVER-captured
+// (never a client-sent field); ipCountry/ipState/ipCity come from an
+// offline GeoIP lookup (a paid API is NOT called per request). The
+// dedup key (visitorId, sessionToken, timestamp) makes a replayed POST
+// a no-op.
+model VisitorEvent {
+  id            String @id @default(cuid())
+  projectId     String
+  project       TrackingProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  visitorId     String @default("")
+  session       VisitorSession? @relation(fields: [sessionToken], references: [sessionToken])
+  sessionToken  String?
+  // MVP parity: the event KIND. "pageview" (the default) or "lead" (a
+  // form-submit / thank-you-page capture from tracker.js). The dedup key is
+  // (visitorId, sessionToken, eventType, timestamp) — a pageview + a lead in
+  // the same second both land; a replay of either is a no-op.
+  eventType     String @default("pageview") // "pageview" | "lead"
+  // WHERE the lead was captured: "thankyou" (thank-you page) | "submit"
+  // (DOM form submit) | "click" (FlexiFunnels submit button) | "ajaxSuccess"
+  // (jQuery form-POST) | "manual" (window.VisitorTracker.trackLead()).
+  leadSource    String?
+  ip            String? // server-captured (cf-connecting-ip first); raw v4/v6 string
+  ipCountry     String?
+  ipState       String?
+  ipCity        String?
+  deviceType    String? // "mobile" | "desktop" | "tablet"
+  osName        String?
+  osVersion     String?
+  browserName   String?
+  browserVer    String?
+  screenW       Int?
+  screenH       Int?
+  landingUrl    String?
+  referrer      String?
+  utmSource     String?
+  utmMedium     String?
+  utmCampaign   String?
+  utmTerm       String?
+  utmContent    String?
+  pageUrl       String?
+  timestamp     DateTime @default(now())
+
+  @@index([projectId])
+  @@index([projectId, eventType])
+  @@index([visitorId])
+  @@index([ip])
+  @@index([timestamp])
+}
+
+// D-17: one session token per page-visit (a per-page-visit token the
+// tracker.js mints in sessionStorage). Unique sessionToken = one session
+// row; a new token = a new session; the same token extends endedAt.
+model VisitorSession {
+  id           String @id @default(cuid())
+  projectId    String
+  project      TrackingProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  visitorId    String
+  sessionToken String @unique // the per-page-visit token (also the dedup axis)
+  startedAt    DateTime @default(now())
+  endedAt      DateTime?
+
+  events VisitorEvent[]
+
+  @@index([projectId, visitorId])
 }
