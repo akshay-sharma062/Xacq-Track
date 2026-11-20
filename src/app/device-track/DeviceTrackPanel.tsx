@@ -29,6 +29,9 @@ interface ProjectRow {
   clientId: string | null;
   clientName: string | null;
   createdAt: string;
+  /** The install script for THIS project (paste into its landing page's
+   *  custom-JS slot). Built server-side from the live-host base. */
+  snippet?: string;
 }
 
 export function DeviceTrackPanel({
@@ -44,16 +47,42 @@ export function DeviceTrackPanel({
   const router = useRouter();
   const pathname = usePathname();
   const [projects, setProjects] = useState<ProjectRow[] | null>(null);
+  const [base, setBase] = useState<string | null>(null);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [form, setForm] = useState({ name: "", landingPageName: "", landingPageUrl: "", clientId: "" });
 
   const load = useCallback(() => {
     fetch("/api/admin/tracker")
       .then((r) => r.json())
-      .then((j) => setProjects(Array.isArray(j?.projects) ? j.projects : []))
+      .then((j) => {
+        setProjects(Array.isArray(j?.projects) ? j.projects : []);
+        if (typeof j?.base === "string") setBase(j.base);
+      })
       .catch(() => setProjects([]));
   }, []);
   useEffect(load, [load]);
+
+  // "Filter by client" axis: when the Topbar client switcher picks a client
+  // (the `client` prop), the list narrows to THAT client's projects (each
+  // with its install script). Absent / "all" = every project.
+  const visibleProjects = (projects ?? []).filter(
+    (p) => !client || p.clientId === client
+  );
+  const selectedClientName = client
+    ? (clients.find((c) => c.id === client)?.name ?? client)
+    : null;
+
+  async function copySnippet(p: ProjectRow) {
+    if (!p.snippet) return;
+    try {
+      await navigator.clipboard.writeText(p.snippet);
+      setCopiedId(p.id);
+      setTimeout(() => setCopiedId(null), 1500);
+    } catch {
+      /* clipboard blocked — the snippet is selectable */
+    }
+  }
 
   async function create(e: React.FormEvent) {
     e.preventDefault();
@@ -67,9 +96,12 @@ export function DeviceTrackPanel({
     });
     const j = await r.json().catch(() => ({}));
     if (r.ok) {
+      // No implicit clipboard write: the snippet is DISPLAYED in the new
+      // project's card (selectable + a copy button) — the PO reads/copies
+      // it deliberately. Refresh the list so the new project's card (with
+      // its visible script) shows up.
       setForm({ name: "", landingPageName: "", landingPageUrl: "", clientId: "" });
-      setMsg(`created '${j.name}' — copy the snippet below into the FlexiFunnels custom-JS slot`);
-      if (j.snippet) navigator.clipboard.writeText(j.snippet).catch(() => {});
+      setMsg(`created '${j.name}' — its install script is in the card above; paste it into the FlexiFunnels custom-JS slot`);
       load();
     } else {
       setMsg(`create failed: ${j.error ?? r.status}`);
@@ -96,44 +128,79 @@ export function DeviceTrackPanel({
 
   return (
     <div className="stack" style={{ gap: 14 }}>
-      {/* project management strip */}
+      {/* project management + the per-client install-script strip */}
       <div className="card">
-        <h3 style={{ marginTop: 0 }}>Tracking projects (all clients)</h3>
-        <table className="tbl">
-          <thead>
-            <tr>
-              <th>Project</th>
-              <th>Landing page</th>
-              <th>Client</th>
-              <th>Status</th>
-              <th>Events</th>
-              <th>Last event</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {(projects ?? []).length === 0 && (
-              <tr><td colSpan={7} className="empty">no tracking projects yet — create one below</td></tr>
-            )}
-            {(projects ?? []).map((p) => (
-              <tr key={p.id}>
-                <td><strong>{p.name}</strong></td>
-                <td className="mono" style={{ fontSize: 11, wordBreak: "break-all" }}>{p.landingPageUrl}</td>
-                <td>{p.clientName ? <span className="badge accent">{p.clientName}</span> : <span className="faint">unassigned</span>}</td>
-                <td>
-                  <button className="btn sm" onClick={() => toggle(p)}>
-                    {p.status === "active" ? "disable" : "enable"}
-                  </button>
-                </td>
-                <td>{p.eventCount}</td>
-                <td className="faint" style={{ fontSize: 11 }}>{p.lastEventAt ? ist(p.lastEventAt) : "—"}</td>
-                <td style={{ whiteSpace: "nowrap" }}>
-                  <button className="btn sm" onClick={() => setProject(p.id)}>view</button>
-                </td>
-              </tr>
+        <div className="row spread" style={{ alignItems: "center" }}>
+          <h3 style={{ margin: 0 }}>
+            {selectedClientName ? `Tracking projects — ${selectedClientName}` : "Tracking projects (all clients)"}
+          </h3>
+          <span className="faint" style={{ fontSize: 11 }}>
+            pick a client in the filter above → its tracking projects + the install script show here
+          </span>
+        </div>
+
+        {visibleProjects.length === 0 ? (
+          <div className="empty" style={{ marginTop: 8 }}>
+            {client ? `no tracking projects for ${selectedClientName} yet — create one below` : "no tracking projects yet — create one below"}
+          </div>
+        ) : (
+          <div className="stack" style={{ gap: 10, marginTop: 10 }}>
+            {visibleProjects.map((p) => (
+              <div key={p.id} className="card" style={{ background: "var(--panel-2)" }}>
+                {/* the project's identity + management */}
+                <div className="row spread" style={{ alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <strong>{p.name}</strong>
+                    <span className="faint" style={{ fontSize: 11 }}>· {p.landingPageName}</span>
+                    <span className={`badge ${p.status === "active" ? "good" : "warn"}`}>{p.status}</span>
+                    {!client ? (
+                      p.clientName
+                        ? <span className="badge accent">{p.clientName}</span>
+                        : <span className="faint">unassigned client</span>
+                    ) : null}
+                    <span className="faint" style={{ fontSize: 11 }}>
+                      {p.eventCount} events{p.lastEventAt ? ` · last ${ist(p.lastEventAt)}` : ""}
+                    </span>
+                  </div>
+                  <div className="row" style={{ gap: 6 }}>
+                    <button className="btn sm" onClick={() => toggle(p)}>
+                      {p.status === "active" ? "disable" : "enable"}
+                    </button>
+                    <button className="btn sm" onClick={() => setProject(p.id)}>analytics</button>
+                  </div>
+                </div>
+
+                {/* the install script — VISIBLE + copyable (paste into the
+                    landing page's custom-JS / FlexiFunnels slot) */}
+                <div style={{ marginTop: 8 }}>
+                  <div className="row spread" style={{ alignItems: "center" }}>
+                    <span className="muted" style={{ fontSize: 11 }}>
+                      install script → paste into <span className="mono">{p.landingPageName}</span> ({p.landingPageUrl})
+                    </span>
+                    <button className="btn sm" onClick={() => copySnippet(p)}>
+                      {copiedId === p.id ? "copied ✓" : "copy script"}
+                    </button>
+                  </div>
+                  <code className="mono" style={{
+                    display: "block",
+                    fontSize: 11,
+                    marginTop: 6,
+                    padding: "8px 10px",
+                    background: "var(--panel)",
+                    border: "1px solid var(--line)",
+                    borderLeft: "3px solid var(--accent)",
+                    borderRadius: 6,
+                    wordBreak: "break-all",
+                    userSelect: "all",
+                    whiteSpace: "pre-wrap",
+                  }}>
+                    {p.snippet || `loading snippet… ${base ? `(base: ${base})` : ""}`}
+                  </code>
+                </div>
+              </div>
             ))}
-          </tbody>
-        </table>
+          </div>
+        )}
 
         {projectId ? (
           <div className="row" style={{ gap: 8, marginTop: 8 }}>

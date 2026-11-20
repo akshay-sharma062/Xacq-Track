@@ -8,6 +8,7 @@ import {
   createTrackingProject,
   workspaceProjectIds,
   trackerDashboard,
+  trackerProjectSummaries,
   setProjectStatus,
 } from "../src/lib/tracker";
 import { pickPublicBase, noteLiveHost, baseFromHostHeader } from "../src/lib/live-host";
@@ -150,6 +151,39 @@ describe("workspaceProjectIds — the client-narrowing axis", () => {
 
     expect(await workspaceProjectIds(p, ws)).toHaveLength(2); // all
     expect(await workspaceProjectIds(p, ws, cl)).toHaveLength(1); // client A only
+    await db.close();
+  });
+});
+
+describe("trackerProjectSummaries — the per-project list (incl. the raw MAX(timestamp) BigInt)", () => {
+  it("returns the owning client + event count + last event; the raw SQL MAX(timestamp) comes back as a BigInt of unix-ms and must not crash `new Date`", async () => {
+    const { p, ws, user, cl } = await ctx();
+    const proj = await createTrackingProject(p, { workspaceId: ws, name: "P", landingPageName: "lp", landingPageUrl: "https://x.example/lp", clientId: cl, createdBy: user });
+    await ingestTrackerEvent(p, { projectId: proj.id, visitorId: "v_1", sessionToken: "s_1", timestamp: "2026-03-01T09:00:00.000Z" }, "1.2.3.4");
+
+    const rows = await trackerProjectSummaries(p, ws);
+    const mine = rows.find((r) => r.id === proj.id);
+    expect(mine).toBeDefined();
+    expect(mine!.clientId).toBe(cl);
+    expect(mine!.clientName).toBe(
+      (await p.client.findUnique({ where: { id: cl } }))?.name
+    );
+    expect(mine!.eventCount).toBe(1);
+    // The regression: MAX(timestamp) is a raw-SQL int64 (a BigInt of ms);
+    // `new Date(bigint)` throws "Cannot convert a BigInt value to a number".
+    // The normaliser must hand back a real Date at the ingested instant.
+    expect(mine!.lastEventAt).toBeInstanceOf(Date);
+    expect((mine!.lastEventAt as Date).getTime()).toBe(Date.parse("2026-03-01T09:00:00.000Z"));
+    await db.close();
+  });
+
+  it("a project with NO events has lastEventAt null (not a crash)", async () => {
+    const { p, ws, user } = await ctx();
+    const proj = await createTrackingProject(p, { workspaceId: ws, name: "P", landingPageName: "lp", landingPageUrl: "https://x.example/lp", createdBy: user });
+    const rows = await trackerProjectSummaries(p, ws);
+    const mine = rows.find((r) => r.id === proj.id);
+    expect(mine!.eventCount).toBe(0);
+    expect(mine!.lastEventAt).toBeNull();
     await db.close();
   });
 });

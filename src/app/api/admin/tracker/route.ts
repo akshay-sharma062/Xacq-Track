@@ -37,7 +37,19 @@ export async function GET(req: NextRequest) {
   if ("error" in g) return NextResponse.json({ error: g.error }, { status: g.status });
   const s = g.session;
   const projects = await trackerProjectSummaries(prisma, s.workspaceId);
-  return NextResponse.json({ projects });
+  // Per-project install snippets (the Device Track "show me the script" case):
+  // every listed project carries the FULL snippet to paste into its landing
+  // page — built from the SAME live-host base (self-captured liveHost > .env
+  // tiers > localhost-dev) the create response uses, so the displayed script
+  // is the one that actually works.
+  const base = await trackerBase(s.workspaceId);
+  return NextResponse.json({
+    base,
+    projects: projects.map((p) => ({
+      ...p,
+      snippet: trackerInstallSnippet(p.id, base),
+    })),
+  });
 }
 
 export async function POST(req: NextRequest) {

@@ -375,6 +375,22 @@ export interface ProjectSummary {
   clientName: string | null;
 }
 
+/**
+ * Normalise a raw-SQL SQLite timestamp value to a JS Date. The SQLite driver
+ * returns `MAX(timestamp)` as a **BigInt of unix-ms** (a Prisma raw-query
+ * int64), while plain column reads come back as Date objects and some
+ * drivers return the ISO string — `new Date(bigint)` throws
+ * "Cannot convert a BigInt value to a number", so every shape is handled.
+ */
+function rawTsToMs(v: unknown): number | null {
+  if (v == null) return null;
+  if (v instanceof Date) return v.getTime();
+  const n = Number(v); // bigint + a numeric string both coerce
+  if (!isNaN(n)) return n;
+  const t = Date.parse(String(v)); // an ISO-8601 string form
+  return isNaN(t) ? null : t;
+}
+
 /** The project list for /admin/tracker (per-project event count + last event +
  *  the owning client for the Device Track "by client" view). */
 export async function trackerProjectSummaries(
@@ -389,7 +405,7 @@ export async function trackerProjectSummaries(
   if (projects.length === 0) return [];
   const ids = projects.map((p) => p.id);
   const counts = await prisma.$queryRawUnsafe<
-    { id: string; n: number; last: string | null }[]
+    { id: string; n: number; last: unknown }[]
   >(
     `SELECT projectId AS id, COUNT(*) AS n, MAX(timestamp) AS last
        FROM "VisitorEvent" WHERE projectId IN (${ids.map(() => "?").join(",")})
@@ -399,6 +415,7 @@ export async function trackerProjectSummaries(
   const byId = new Map(counts.map((c) => [c.id, c]));
   return projects.map((p) => {
     const c = byId.get(p.id);
+    const lastMs = c ? rawTsToMs(c.last) : null;
     return {
       id: p.id,
       name: p.name,
@@ -408,7 +425,7 @@ export async function trackerProjectSummaries(
       createdAt: p.createdAt,
       updatedAt: p.updatedAt,
       eventCount: c ? Number(c.n) : 0,
-      lastEventAt: c?.last ? new Date(c.last) : null,
+      lastEventAt: lastMs == null ? null : new Date(lastMs),
       clientId: p.clientId,
       clientName: p.client?.name ?? null,
     };
