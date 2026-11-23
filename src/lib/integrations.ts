@@ -79,6 +79,9 @@ export function isPlatform(p: unknown): p is SourcePlatform {
   const ok: SourcePlatform[] = [
     "meta", "aevent", "zoom", "tagmango", "razorpay", "cashfree",
     "cosmofeed", "flexifunnels", "calendly", "pabbly", "whatsapp", "xt", "sheets", "manual",
+    // D-21: Lovable = a header-less form host (the PO hand-wires a fetch() to
+    // the unsigned /api/webhooks/lovable endpoint; tracking rides D-17).
+    "lovable",
   ];
   return typeof p === "string" && ok.includes(p as SourcePlatform);
 }

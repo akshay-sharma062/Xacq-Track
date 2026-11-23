@@ -176,11 +176,11 @@ describe("adapters — every platform replays its saved sample (spec 8)", () => 
     expect(r?.type).toBe("note_added");
   });
 
-  it("catalog exposes all 14 first-version platforms", () => {
+  it("catalog exposes all 15 first-version platforms (incl. D-21 lovable)", () => {
     const platforms = adapterCatalog().map((a) => a.platform).sort();
     expect(platforms).toEqual([
       "aevent", "calendly", "cashfree", "cosmofeed", "flexifunnels",
-      "manual", "meta", "pabbly", "razorpay", "sheets", "tagmango",
+      "lovable", "manual", "meta", "pabbly", "razorpay", "sheets", "tagmango",
       "whatsapp", "xt", "zoom",
     ]);
   });

@@ -1509,3 +1509,91 @@ one form submit → the first device/lead rows appear in the tab
 (the install snippet's host is the SELF-CAPTURED live host, not a stale
 `.env` value); the `conversionRate` + "Recent leads" reflect the
 submit.**
+
+## D-21 — Lovable: a tracked platform + landing-page host, the way FlexiFunnels was (2026-11-21) [REVIEW]
+
+**What was built:** Lovable (lovable.dev) — a React + Vite + Supabase
+app / landing-page BUILDER — is now a first-class tracked platform +
+landing-page host, integrated the way FlexiFunnels was (D-18/D-19),
+adapted to what Lovable can ACTUALLY send.
+
+**FIRST — the Lovable-side verdicts (recorded before building; a "not
+supported" is a finding, not a failure):**
+- **(a) CUSTOM JS INJECTION = YES.** A Lovable app is "backed by editable
+  code" (the docs' one firm fact this build rests on — apps sync to
+  GitHub). The PO can add the D-17 `tracker.js` `<script data-project=…>`
+  to the app's head. So **Lovable-hosted landing pages track in Device
+  Track with NO new code** — a `TrackingProject` + the snippet
+  `createTrackingProject` + `trackerInstallSnippet` already generate.
+  We reuse the existing `tracker.js` (never a second tracker).
+- **(b) NATIVE FORM→WEBHOOK = NO.** Lovable has no builder setting that
+  POSTs a form's fields to an external URL; its forms write to the
+  app's own Supabase. Lead capture therefore arrives **only if the PO
+  hand-edits the app's React code to `fetch()`-POST our unsigned
+  `/api/webhooks/lovable` endpoint**. The adapter + route exist and
+  work, but they are opt-in (PO wires the `fetch()`), not something
+  Lovable fires for the PO — the panel + hub both say so.
+
+**What was built (additive only — NO schema change; `WebhookEndpoint
+.platform` is a free String column, so "lovable" is a new VALUE,
+reusing `WebhookLog`/`Event`/`Lead`):**
+- `src/lib/types.ts` — `SourcePlatform += "lovable"` (the `[platform]`
+  route auto-enumerates `ADAPTERS`, so `/api/webhooks/lovable` is
+  accepted the moment the adapter is registered — no route change).
+- `src/lib/adapters/lovable.ts` (NEW) — an **unsigned** simple-gateway
+  adapter (`verify`: `if (!secret) return true; else header===secret`),
+  extraction **reusing `flexiFormFieldsFromRaw`** (the D-19 flat-shape
+  extractor) — a Lovable form POST is a flat
+  `{name,email,phone,city,<custom>,utm_*,fbclid}` object, so identity +
+  UTM + fbclid land on NAMED props and the user-named custom fields
+  land in `record.meta` (D-19 parity; no field lost). A Lovable form
+  POST is a `registered` lead, NEVER a payment.
+- `src/lib/adapters/index.ts` — register `lovableAdapter` + add
+  `"lovable"` to **`UNSIGNED_ONLY`** (header-less → created connection
+  is `endpointSecret=""`, plain-POST-accepted, bounded by per-conn
+  rate limit + client-id + gateway-txn dedup).
+- `src/lib/integrations.ts` — `isPlatform` list += `"lovable"`.
+- **Admin panel** — a **Lovable quick-action card** (mirror of the
+  FlexiFunnels card): "Generate webhook" (platform = Lovable) now
+  shows; the card says tracking = Device Track project + snippet, lead
+  capture = opt-in `fetch()` (no secret).
+- **Integrations hub** — a Lovable note card with the verdicts + the
+  `/api/webhooks/lovable` URL.
+
+**Guardrails honoured:** additive only (new adapter + `SourcePlatform`
+member + `UNSIGNED_ONLY` entry + admin/hub notes; NO schema change,
+`db push` not run — a new platform value needs no migration); no fake
+data (a Lovable lead is `registered`, no fabricated payment/identity;
+the panel says lead capture is opt-in, not claimed live); pull rows
+untouched (`ad=3857 / adSet=1190 / spend=3857`, G1=cl_upcurvv, WAL
+stands — D-21 writes nothing to any pull table); secrets only in `.env`
+(the Lovable connection is unsigned = "", like the other header-less
+platforms, never a `.env` value); PII masked per the existing
+`maskPhone` rule; no `.env`/`dev.db`/`.next`/scratch and no unpushed
+D-17/D-19 work in the commit.
+
+**Tests:** `test/d21.test.ts` — 7/7 green: (1) the adapter extracts
+the flat form fields → NAMED props + `record.meta` (custom in meta,
+named not duplicated, a bare POST degrades to a no-field `registered`
+lead); (2) `/api/webhooks/lovable` is UNSIGNED — a created connection
+is `secret=""` and the empty-secret POST (no secret header) lands a
+real lead exactly like D-18's FlexiFunnels fix (`processed`, 1 event,
+1 lead, 0 payments); (3) a Lovable tracking project +
+`trackerInstallSnippet` generate the correct `data-project=<id>`
+`tracker.js` snippet (the Device Track install the PO pastes into the
+Lovable app head). The D-18 `it.each(UNSIGNED_ONLY)` auto-gains the
+lovable row; `adapters.test.ts` catalog count 14→15. Full suite
+green; `typecheck` 0; `build` exit 0. No `next dev` next to prod.
+
+**Commit:** ONE `[REVIEW]` commit (new unsigned platform adapter +
+`SourcePlatform`/`UNSIGNED_ONLY`/`isPlatform` additions + admin/hub
+UI + 7 new tests + the 3 doc files) — local only, the PO reviews +
+pushes per the standing rule.
+
+**Next gate = PO creates a Device Track project for the Lovable app +
+pastes the generated `tracker.js` snippet into the Lovable app's head
++ drives 1 real visit → a Device Track row appears (tracking is the
+LIVE half). The lead-capture half stays opt-in: only when the PO wires
+the app's own `fetch()` to the unsigned `/api/webhooks/lovable`
+endpoint does a Lovable lead land — until then it is "tracking LIVE,
+lead-capture AWAITING PO hand-wiring", not claimed live.**

@@ -46,7 +46,8 @@ export type SourcePlatform =
   | "whatsapp"
   | "xt"
   | "sheets"
-  | "manual";
+  | "manual"
+  | "lovable";
 
 // ---------------------------------------------------------------------------
 // Attribution (spec 7)

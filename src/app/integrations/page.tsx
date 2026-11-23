@@ -67,6 +67,29 @@ export default async function IntegrationsPage({
         </div>
       </div>
 
+      {/* D-21: the Lovable note — what Lovable can and can't send natively,
+          so the PO doesn't expect a form webhook Lovable doesn't fire. */}
+      <div className="card mb" style={{ borderLeft: "3px solid var(--accent)" }}>
+        <div className="row spread">
+          <div>
+            <strong>Lovable</strong>
+            <div className="faint" style={{ fontSize: 12, marginTop: 2 }}>
+              A React + Vite + Supabase app builder, integrated the way FlexiFunnels was.
+            </div>
+          </div>
+          <span className="badge accent">tracking + form host</span>
+        </div>
+        <div className="muted" style={{ fontSize: 12, lineHeight: 1.5, marginTop: 6 }}>
+          <b>Tracking (LIVE):</b> paste the generated <code>tracker.js</code> snippet (from{" "}
+          <b>Device Track</b>) into the Lovable app&apos;s head — Lovable-hosted landing pages
+          then land in Device Track exactly like Flexi pages.{" "}
+          <b>Lead capture (opt-in):</b> Lovable has no native form→webhook, so leads come in only
+          if the app&apos;s own code <code>fetch()</code>-POSTs{" "}
+          <code>/api/webhooks/lovable?client=&lt;id&gt;…</code> (unsigned) with the submitted
+          fields — that URL is listed below and wired into the pipeline.
+        </div>
+      </div>
+
       <div className="grid cols-2 mb">
         {platforms.map((a) => {
           const url = `${base}/api/webhooks/${a.platform}?client=${clientId}`;

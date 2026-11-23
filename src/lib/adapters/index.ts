@@ -23,6 +23,7 @@ import {
   xtAdapter,
   manualAdapter,
 } from "./engagements";
+import { lovableAdapter } from "./lovable";
 
 export const ADAPTERS: Record<SourcePlatform, Adapter> = {
   meta: metaLeadFormAdapter,
@@ -39,6 +40,7 @@ export const ADAPTERS: Record<SourcePlatform, Adapter> = {
   sheets: sheetsAdapter,
   xt: xtAdapter,
   manual: manualAdapter,
+  lovable: lovableAdapter,
 };
 
 export function adapterFor(platform: SourcePlatform): Adapter {
@@ -61,6 +63,11 @@ export function adapterCatalog(): Adapter[] {
 // on every real POST (undefined header !== stored secret) → "verification
 // failed". These must run UNSIGNED (endpointSecret = "").
 //
+// D-21 — Lovable joins this list: it has no outbound webhook of its own;
+// the only lead-capture path is the PO hand-editing the app's React code to
+// `fetch()`-POST our unsigned `/api/webhooks/lovable` endpoint, so it sends
+// no signature header either → must run UNSIGNED like the others.
+//
 // Signed-capable gateways (Razorpay HMAC, Cashfree HMAC, …) are NOT in this
 // list — they keep their per-connection secrets and MUST still verify.
 // This loosening applies ONLY to the header-less platforms (the D-18
@@ -70,7 +77,7 @@ export function adapterCatalog(): Adapter[] {
 // the admin route import isUnsignedOnly() from here — never hardcode the
 // list elsewhere.
 // ---------------------------------------------------------------------------
-export const UNSIGNED_ONLY: readonly SourcePlatform[] = ["flexifunnels", "cosmofeed", "tagmango"];
+export const UNSIGNED_ONLY: readonly SourcePlatform[] = ["flexifunnels", "cosmofeed", "tagmango", "lovable"];
 
 export function isUnsignedOnly(platform: unknown): platform is SourcePlatform {
   return typeof platform === "string" && UNSIGNED_ONLY.includes(platform as SourcePlatform);

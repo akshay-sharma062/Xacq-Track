@@ -413,6 +413,22 @@ export function IntegrationsPanel({
   // value can't be re-read — by design).
   const ffHooks = (webhooks ?? []).filter((w) => w.platform === "flexifunnels");
 
+  // D-21: Lovable = a header-less form host (the PO hand-wires the app's own
+  // fetch() to this endpoint; no native form webhook). Lovable connections
+  // run UNSIGNED exactly like FlexiFunnels — paste only the inboundUrl, never
+  // a secret. The TRACKING snippet lives in Device Track (D-17), not here.
+  const lovableHooks = (webhooks ?? []).filter((w) => w.platform === "lovable");
+  const [copiedLov, setCopiedLov] = useState<string | null>(null);
+  async function copyLovUrl(id: string, url: string) {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopiedLov(id);
+      setTimeout(() => setCopiedLov(null), 1500);
+    } catch {
+      /* clipboard blocked — the URL is selectable */
+    }
+  }
+
   // D-15: the CURRENT live host to copy from — the PO-persisted Workspace
   // liveHost (written by "Refresh URLs") wins; else the .env generation base.
   // The copy-paste block re-hosts each connection against this, so the PO
@@ -914,6 +930,76 @@ export function IntegrationsPanel({
                     ? "This row still carries a leftover secret, so real events currently log 'verification failed'. Click the clear-secret button in the table above (or run the one-off script) to fix it without re-generating."
                     : "Paste only the inboundUrl above."}
                 </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* --------------------- D-21: LOVABLE QUICK ACTION ------------------- */}
+      <div className="card" style={{ borderLeft: "3px solid var(--accent)" }}>
+        <div className="row spread" style={{ marginBottom: 10 }}>
+          <h3 style={{ margin: 0 }}>Lovable quick-action</h3>
+          <span className="faint" style={{ fontSize: 11 }}>UI-only guidance · tracking rides Device Track</span>
+        </div>
+
+        <div className="muted" style={{ fontSize: 12, lineHeight: 1.5, marginBottom: 10 }}>
+          Lovable (lovable.dev) is a React + Vite + Supabase app builder.{" "}
+          <b>Tracking (LIVE):</b> create a tracking project in <b>Device Track</b> pointing at the
+          Lovable app&apos;s landing page, then paste the generated{" "}
+          <code className="mono">tracker.js</code> snippet into the Lovable app&apos;s head — its
+          pages land in Device Track like Flexi pages. <b>Lead capture (opt-in):</b> Lovable has no
+          native form→webhook, so leads arrive only when the app&apos;s own code{" "}
+          <code className="mono">fetch()</code>-POSTs the unsigned endpoint below.
+        </div>
+
+        {lovableHooks.length === 0 ? (
+          <div className="empty">
+            no Lovable connections yet — generate one above (platform = Lovable). It&apos;s created
+            unsigned (no secret to paste, like FlexiFunnels): the app&apos;s fetch() POSTs the bare
+            inboundUrl.
+          </div>
+        ) : (
+          <div className="stack" style={{ gap: 14 }}>
+            {lovableHooks.map((w) => (
+              <div key={w.id} className="card" style={{ background: "var(--panel-2)" }}>
+                <div className="row spread" style={{ marginBottom: 6 }}>
+                  <span className="badge accent">{w.label}</span>
+                  {w.hasSecret
+                    ? <span className="badge warn" style={{ fontSize: 11 }} title="A leftover secret — Lovable can't send it; clear so this runs unsigned">leftover secret</span>
+                    : <span className="badge good" style={{ fontSize: 11 }}>unsigned (plain)</span>}
+                  <span className={w.active ? "good" : "bad"} style={{ fontSize: 11 }}>{w.active ? "active" : "revoked"}</span>
+                </div>
+                <div className="stack" style={{ gap: 4, marginBottom: 8 }}>
+                  <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <span className="faint" style={{ fontSize: 11 }}>copy (current host):</span>
+                    <code className="mono" style={{ fontSize: 10, wordBreak: "break-all", userSelect: "all" }}>
+                      {ffUrlFor(w)}
+                    </code>
+                    <button className="btn sm" onClick={() => copyLovUrl(w.id, ffUrlFor(w))}>
+                      {copiedLov === w.id ? "copied ✓" : "copy"}
+                    </button>
+                  </div>
+                </div>
+                <table className="tbl">
+                  <thead>
+                    <tr><th>Where it goes</th><th>What</th></tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>Tracking (LIVE)</td>
+                      <td className="mono" style={{ fontSize: 11, wordBreak: "break-all" }}>
+                        Device Track → create project → paste the <span className="faint">tracker.js snippet</span> into the Lovable app head
+                      </td>
+                    </tr>
+                    <tr>
+                      <td>Lead capture (opt-in)</td>
+                      <td className="mono" style={{ fontSize: 11, wordBreak: "break-all" }}>
+                        the app&apos;s form handler → <span className="faint">fetch(inboundUrl)</span> (no secret)
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
               </div>
             ))}
           </div>
