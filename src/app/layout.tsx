@@ -25,11 +25,14 @@ export default async function RootLayout({ children }: { children: React.ReactNo
     <html lang="en">
       <body>
         {/* D-20: Chart.js v4.5.0 UMD — loaded once in the app shell (before any "use client"
-            dashboard component mounts), with SRI verification. */}
+            dashboard component mounts), with SRI verification.
+            Digest = SHA-384 of the EXACT chart.js@4.5.0 UMD bytes from jsDelivr
+            (208,341 B, verified live — a truncated/incorrect digest makes the
+            browser BLOCK the script, which took the whole dashboard down). */}
 
         <Script
           src="https://cdn.jsdelivr.net/npm/chart.js@4.5.0/dist/chart.umd.min.js"
-          integrity="sha384-XcdcwHqIPULERb2yDEM4R0XaQKU3YnDsrTmjACBZyfdVVqjh6xQ4/DCMd7XLcA6"
+          integrity="sha384-XcdcwHqIPULERb2yDEM4R0XaQKU3YnDsrTmjACBZyfdVVqjh6xQ4/DCMd7XLcA6Y"
           crossOrigin="anonymous"
           strategy="beforeInteractive"
         />
