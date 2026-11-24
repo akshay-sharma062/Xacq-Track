@@ -1772,12 +1772,45 @@ the 3857 point — the delta is exactly the onboarding writes; WAL stands).
   just-pulled data, and closes. A slim sticky strip under the Topbar
   always shows the strip state + the manual **Pull now** button.
 
+**The 90 s cap (both ends, the "never hold the page hostage" rule):**
+- SERVER — `MAX_PULL_MS` (`REFRESH_PULL_MAX_MS`, default 90 s): a
+  single refresh-triggered pull that's still running at the cap returns
+  `{pulled:false, runningInBackground:true, reason}` (NEVER a fake
+  success) and the pull KEEPS RUNNING in the background — the response
+  races the cap, but the lock is released only when the pull SETTLES
+  (never at the cap; the single-writer rule holds for the whole
+  Meta→DB write), so the data lands and the next refresh / 60 s tick
+  shows it.
+- CLIENT — `DataPreloader` + the pipeline `PipelinePullButton` both
+  enforce the same 90 s max-wait (`AbortController` aborts the request;
+  an honest "running in the background" note replaces the fake
+  spinner), so no client-side path holds the page open past the bound.
+
+**Tests (`test/refresh.test.ts`, 7 cases at the proven d14 boundary —
+fresh temp DB + DEMO_USER session + `globalPrisma` reset, only
+`pullAllAccounts` mocked so no real Meta):**
+1. slow-pull cap: a mocked 500 ms pull under a 150 ms cap → `pulled:false`
+   + `runningInBackground`, never a fake success; the data lands on the
+   next refresh (the lock released when the bg pull settled is proven by
+   the follow-up forced pull answering `pulled:true`).
+2. role-gating: unknown-email session → 401, a `viewer` user (no
+   `pull_meta`) → 403 — neither ever reaches Meta.
+3. throttle: two auto pulls inside the 5-min min gap → the 2nd skips
+   Meta ("throttled"), `force:true` still pulls (2 Meta calls, not 3).
+4. preloader source contract: the client-side 90 s cap + AbortController
+   + the honest background/abort notes are wired in `DataPreloader.tsx` +
+   `PipelinePullButton.tsx` + the route (asserted on source, the D-12
+   precedent — client-component timing logic is not hermetically
+   testable, the contract text is).
+The pipeline page gained the manual "Pull now" button
+(`PipelinePullButton`, posts `force:true` for the page's client — the
+dashboard's preloader already had its own).
+
 **Guardrails honoured:** the pull path reuses the EXISTING
 `pullAllAccounts` + `acquirePullLock` primitives (no second Meta path, no
 new quota class); throttle + lock mean a 60 s refresh tick is bounded to
 one real pull per account per 5 min (force-bypass is an explicit user
-act); `.env` / `dev.db` / `.next` / scratch stay out of commits;
-typecheck 0 · build 0 · full suite green (D-22 added no test — the route
-delegates to the lock + pull primitives both already covered by
-`test/pull-lock.test.ts` + the D-04 onboarding tests, and the preloader is
-a client overlay with no data logic).
+act); the 90 s caps bound both the request open-time AND the UI
+wait-time without canceling the background write; `.env` / `dev.db` /
+`.next` / scratch stay out of commits; typecheck 0 · build 0 · full
+suite green.

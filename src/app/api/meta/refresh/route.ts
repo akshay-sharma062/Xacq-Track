@@ -36,6 +36,12 @@ import { acquirePullLock, releasePullLock } from "@/jobs/pull-lock";
  *  Overridable via REFRESH_PULL_MIN_MS; default 5 min — frequent enough that a
  *  refresh shows live data, gentle enough not to burn Meta quota. */
 const MIN_INTERVAL_MS = Number(process.env.REFRESH_PULL_MIN_MS ?? 5 * 60_000);
+/** Max time a single refresh-triggered pull may hold the request open.
+ *  A Meta pull of a large account can exceed it — the route then returns
+ *  `pulled:false` with the exact reason, but the pull KEEPS RUNNING in the
+ *  background (lock held until it settles — the single-writer rule still
+ *  holds) so the data lands for the next refresh. Override: REFRESH_PULL_MAX_MS. */
+const MAX_PULL_MS = Number(process.env.REFRESH_PULL_MAX_MS ?? 90_000);
 const lastRealPull = new Map<string, number>(); // "client|account" -> epoch ms
 
 export async function POST(req: NextRequest) {
@@ -125,7 +131,14 @@ export async function POST(req: NextRequest) {
   return runRealPull(client, [adAccount], force);
 }
 
-/** The single-writer-gated real Meta pull of one or more accounts. */
+/** The single-writer-gated real Meta pull of one or more accounts.
+ *
+ *  The response is RACE-D against MAX_PULL_MS (the 90 s refresh cap): a pull
+ *  still running at the cap returns `{pulled:false, runningInBackground:true,
+ *  reason}` so the preloader can close with an honest note — but the pull
+ *  Promise is NOT cancelled: it keeps going and the lock is released when it
+ *  SETTLES (never at the cap — the single-writer rule must hold for the whole
+ *  Meta→DB write), so the data lands and the next refresh / 60 s tick shows it. */
 async function runRealPull(clientId: string, metaIds: string[], force: boolean) {
   const token = process.env.META_ACCESS_TOKEN ?? "";
   const apiVersion = process.env.META_API_VERSION || "v23.0";
@@ -149,32 +162,67 @@ async function runRealPull(clientId: string, metaIds: string[], force: boolean) 
     });
   }
 
-  const t0 = Date.now();
-  try {
-    const { failures } = await pullAllAccounts(prisma, clientId, token, metaIds, apiVersion);
-    // Stamp the throttle per account that actually ran (force pulls count too).
-    for (const m of metaIds) lastRealPull.set(`${clientId}|${m}`, Date.now());
-    const dataAsOf = await maxLastPulledAt(clientId);
-    if (failures.length) {
-      // An account-level Meta 4xx/403 is recorded, not a crash — report it
-      // honestly so the preloader note isn't a fake "updated".
+  const pullStart = Date.now();
+  // Total: the pull + lock release. Its late settle (after the cap fired) is
+  // swallowed — the response is already sent; the data still lands.
+  const pullThenRelease: Promise<NextResponse> = (async () => {
+    try {
+      const { failures } = await pullAllAccounts(prisma, clientId, token, metaIds, apiVersion);
+      // Stamp the throttle per account that actually ran (force pulls count too).
+      for (const m of metaIds) lastRealPull.set(`${clientId}|${m}`, Date.now());
+      const dataAsOf = await maxLastPulledAt(clientId);
+      if (failures.length) {
+        // An account-level Meta 4xx/403 is recorded, not a crash — report it
+        // honestly so the preloader note isn't a fake "updated".
+        return NextResponse.json({
+          pulled: true,
+          failed: true,
+          tookMs: Date.now() - pullStart,
+          dataAsOf,
+          errors: failures.map((f) => `${f.account}: ${f.error}`),
+        });
+      }
+      return NextResponse.json({
+        pulled: true,
+        tookMs: Date.now() - pullStart,
+        dataAsOf,
+        message: `pulled ${metaIds.join(", ")}`,
+      });
+    } catch {
       return NextResponse.json({
         pulled: true,
         failed: true,
-        tookMs: Date.now() - t0,
-        dataAsOf,
-        errors: failures.map((f) => `${f.account}: ${f.error}`),
+        dataAsOf: null,
+        errors: ["unexpected pull error — retry on next refresh"],
       });
+    } finally {
+      releasePullLock();
     }
-    return NextResponse.json({
-      pulled: true,
-      tookMs: Date.now() - t0,
-      dataAsOf,
-      message: `pulled ${metaIds.join(", ")}`,
-    });
-  } finally {
-    releasePullLock();
-  }
+  })();
+
+  // A forced pull is capped too (the preloader's client-side cap is the UI
+  // bound; the background-keep-going behaviour is identical).
+  const cap = new Promise<NextResponse>((resolve) => {
+    setTimeout(() => {
+      void maxLastPulledAt(clientId).then((dataAsOf) =>
+        resolve(
+          NextResponse.json({
+            pulled: false,
+            runningInBackground: true,
+            maxWaitMs: MAX_PULL_MS,
+            reason: `pull still running after the ${Math.round(MAX_PULL_MS / 1000)}s cap — it continues in the background; the data lands on the next refresh`,
+            dataAsOf,
+          })
+        )
+      );
+    }, MAX_PULL_MS);
+  });
+
+  const [won] = await Promise.all([
+    Promise.race([pullThenRelease, cap]),
+    pullThenRelease.catch(() => {}), // keep the late settle observed (no unhandled rejection)
+  ]);
+  return won;
 }
 
 /** The "Data as of" stamp: max lastPulledAt over the client's account(s). */

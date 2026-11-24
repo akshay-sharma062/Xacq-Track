@@ -32,6 +32,11 @@ export function DataPreloader({
   /** Hide the overlay logic entirely (e.g. a screen without a dashboard). */
   visible?: boolean;
 }) {
+  /** Client-side max wait (spec): the preloader NEVER holds the page open
+   *  past this. The server keeps the pull running in the background — the
+   *  data lands on the next refresh / 60 s tick. */
+  const MAX_WAIT_MS = 90_000;
+
   const router = useRouter();
   const [phase, setPhase] = useState<"pulling" | "updated" | "note" | "idle">("idle");
   const [startedAt, setStartedAt] = useState<number>(0);
@@ -50,6 +55,12 @@ export function DataPreloader({
       setStartedAt(Date.now());
       setElapsed(0);
       setPhase("pulling");
+      // The 90 s client cap (spec): abort the request at the bound — the
+      // server keeps its pull running in the background, so the data lands
+      // on the next refresh and this page is never held hostage by a slow
+      // account. The overlay shows the honest "running in background" note.
+      const controller = new AbortController();
+      const capTimer = setTimeout(() => controller.abort(), MAX_WAIT_MS);
       try {
         const r = await fetch("/api/meta/refresh", {
           method: "POST",
@@ -59,9 +70,14 @@ export function DataPreloader({
             client: clientIdRef.current ?? undefined,
             force: manual,
           }),
+          signal: controller.signal,
         });
         const j = await r.json().catch(() => ({}));
-        if (j.error) {
+        if (j.runningInBackground) {
+          // The server raced its own cap: pull still going — honest note.
+          setNote(j.reason ?? "pull running in the background — data lands on the next refresh");
+          setPhase("note");
+        } else if (j.error) {
           setNote(`could not refresh — ${j.error}`);
           setPhase("note");
         } else if (j.pulled && j.failed) {
@@ -75,10 +91,15 @@ export function DataPreloader({
         }
         // Re-render the server component with whatever the pull produced.
         void router.refresh();
-      } catch {
-        setNote("refresh request failed (network) — showing last known data");
+      } catch (e) {
+        if (controller.signal.aborted) {
+          setNote("pull is running in the background (hit the 90 s cap) — the data lands on the next refresh");
+        } else {
+          setNote("refresh request failed (network) — showing last known data");
+        }
         setPhase("note");
       } finally {
+        clearTimeout(capTimer);
         inFlight.current = false;
       }
     },

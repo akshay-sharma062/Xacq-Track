@@ -1597,3 +1597,73 @@ LIVE half). The lead-capture half stays opt-in: only when the PO wires
 the app's own `fetch()` to the unsigned `/api/webhooks/lovable`
 endpoint does a Lovable lead land — until then it is "tracking LIVE,
 lead-capture AWAITING PO hand-wiring", not claimed live.**
+
+## D-22 — pull-on-refresh + data preloader, and the Tejasvvita onboarding (2026-11-24) [REVIEW]
+
+**The ask:** "add the new client Tejasvvita (`3270952129616660`) + make
+sure Piyush is still in; on EVERY dashboard refresh, pull fresh Meta
+data, and show a preloader while the data isn't fully in yet."
+
+**Onboarding (additive data, not code):** `META_AD_ACCOUNT_IDS` in
+`.env` (local, never committed) gained `3270952129616660`; the D-04
+`onboard:accounts` runner auto-provisioned + full-pulled it → **client
+`cl_pro-career-ignition-5k-funded-personal`** ("Pro Career Ignition 5k
+Funded Personal", INR): 31 campaigns / 64 ad sets / 117 ads / ₹18,507.31
+INR. Piyush (`cl_piyush-ahuja`, `act_1377451727314532`) re-pulled to
+367 ads / ₹67,606.28. All 8 accounts read OK from Meta; the G1
+non-regression held (`act_…2164 → cl_upcurvv`). New data fixed point:
+`ad=4202 / adSet=1343 / spend=4202, 8 clients` (supersedes the D-21
+`ad=3857` point — the delta is exactly the onboarding writes; WAL
+stands).
+
+**Pull-on-refresh + preloader (the code half):**
+- `POST /api/meta/refresh` (NEW, `pull_meta`-gated like
+  `POST /api/meta/pull`): the dashboard preloader calls it on mount
+  (every browser refresh) + on the 60 s tick. A specific ad-account
+  filter → a REAL Meta pull of that account, targeted at its OWNER
+  client (in the all-clients view the selected account belongs to its
+  own client, not `resolveClient("all")`); the all-clients aggregate
+  view → DB re-read (no fleet-wide pull held open behind a spinner).
+  `force:true` (the buttons) bypasses the throttle.
+- `DataPreloader` (dashboard) + `PipelinePullButton` (the pipeline
+  page's manual "Pull now"): a full-screen preloader blocks the view
+  while a real pull runs ("Pulling fresh data… Ns"), then flashes the
+  honest outcome ("✓ up to date" / "throttled" / "running in the
+  background") and `router.refresh()`es with the fresh data.
+- **Dual 90 s caps:** server `MAX_PULL_MS`
+  (`REFRESH_PULL_MAX_MS`, default 90 s) — a pull still running at the
+  cap returns `pulled:false` + `runningInBackground:true` (NEVER a
+  fake success) and keeps running in the background; the lock releases
+  only when it SETTLES (single-writer rule holds for the whole Meta→DB
+  write), so the data lands on the next refresh. Client — an
+  `AbortController` at the same 90 s so no client path holds the page
+  hostage.
+- **Safety rails:** the single-writer `acquirePullLock` gate (never
+  parallelizes the 10-min tick / manual pull) + a per-account 5-min
+  auto throttle (`REFRESH_PULL_MIN_MS`); no-token / simulate mode →
+  honest `{pulled:false}` no-op; a Meta 4xx/403 → `{pulled:true,
+  failed:true, errors[]}` (never a fake "updated").
+
+**Tests:** `test/refresh.test.ts` — 7/7 green at the proven d14
+boundary (fresh temp DB + `DEMO_USER` session + the `globalPrisma`
+reset; only `pullAllAccounts` mocked so no real Meta): (1) the slow-pull
+cap (a 500 ms mocked pull under a 150 ms cap → `pulled:false` +
+`runningInBackground`, the data lands on the next refresh + the
+follow-up forced pull proves the lock released); (2) 401 for a
+session that resolves to no user + 403 for a `viewer` (no `pull_meta`)
+— neither reaches Meta; (3) throttle (two auto pulls in the min gap →
+the 2nd skips Meta, `force:true` still pulls: 2 Meta calls, not 3);
+(4) the preloader source contracts (the 90 s client cap +
+AbortController + the honest notes are wired in `DataPreloader.tsx` +
+`PipelinePullButton.tsx` + the route). Full suite green; `typecheck`
+0; `build` exit 0. No `next dev` next to prod.
+
+**Commit:** ONE `[REVIEW]` commit (the refresh route + the two
+preloader components + the pipeline wiring + 7 new tests + the 3 doc
+files; `.env`/`dev.db`/`.next`/scratch stay out) — local only, the PO
+reviews + pushes per the standing rule.
+
+**Next gate = the PO refreshes the dashboard with a client selected →
+the preloader shows a live pull, and Tejasvvita + Piyush's numbers
+update; a slow account past 90 s shows the honest "running in the
+background" note and its data lands on the next refresh.**

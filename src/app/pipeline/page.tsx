@@ -1,5 +1,6 @@
 import { Topbar } from "../components/Topbar";
 import { inr } from "../components/ui";
+import { PipelinePullButton } from "../components/PipelinePullButton";
 import { getSession, resolveClient, qs } from "@/lib/api-utils";
 import { searchLeads } from "@/lib/leads";
 import { prisma } from "@/lib/prisma";
@@ -53,6 +54,12 @@ export default async function PipelinePage({
   return (
     <>
       <Topbar title="Pipeline" crumb={`${client?.name} · ${rows.length} leads · ${funnel?.name ?? "default funnel"}`} />
+
+      {/* Manual force-pull (bypasses the 5-min auto-refresh throttle): a real
+          Meta pull of THIS client's ad account(s), with the 90 s client cap. */}
+      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 8 }}>
+        <PipelinePullButton clientId={clientId} />
+      </div>
 
       <div className="kanban">
         {[...byStage.entries()].map(([stage, leads]) => (
