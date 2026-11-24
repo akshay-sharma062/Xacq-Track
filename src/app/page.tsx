@@ -11,6 +11,7 @@ import {
 } from "./components/ui";
 import { AutoRefresh } from "./components/AutoRefresh";
 import { RangePicker } from "./components/RangePicker";
+import { DataPreloader } from "./components/DataPreloader";
 import { getSession, resolveClient, qs } from "@/lib/api-utils";
 import { visibleClients } from "@/lib/session";
 import { dashboardAll, clientProfile, SpendRange } from "@/lib/dashboard";
@@ -84,6 +85,14 @@ export default async function Dashboard({
   return (
     <>
       <Topbar title="Dashboard" crumb={`${view} · ${rangeLabel}${acctLabel}`} />
+      {/* Pull-on-refresh: a real Meta pull of the visible account(s) on mount +
+          60 s ticks (server-side throttled + single-writer locked), with a
+          full-screen preloader while it runs. The "all clients" aggregate view
+          auto-refresh re-reads the scheduler-fresh DB (no fleet-wide pull). */}
+      <DataPreloader
+        adAccount={adAccountMeta}
+        clientId={isAll ? undefined : client}
+      />
       <AutoRefresh dataAsOf={d.sync.dataAsOf} />
       <RangePicker />
 

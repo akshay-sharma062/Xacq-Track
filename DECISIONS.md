@@ -1726,3 +1726,58 @@ lead-capture half stays opt-in: only when the PO wires the app's own
 `fetch()` to the unsigned `/api/webhooks/lovable` endpoint does a Lovable lead
 land — until then it is "tracking LIVE, lead-capture AWAITING PO hand-wiring",
 not claimed live.**
+
+## D-22 — pull-on-refresh + data preloader, and the Tejasvvita onboarding (2026-11-24)
+
+**The ask:** "add the new client Tejasvvita (`3270952129616660`) + make sure
+Piyush is still in; on EVERY dashboard refresh, pull fresh Meta data, and
+show a preloader while the data isn't fully in yet."
+
+**Onboarding (additive data, not code):** `META_AD_ACCOUNT_IDS` in `.env`
+(local, never committed) gained `3270952129616660`; `pnpm onboard:accounts`
+auto-provisioned + full-pulled it → **client `cl_pro-career-ignition-5k-funded-
+personal`** ("Pro Career Ignition 5k Funded Personal", INR): 31 campaigns /
+64 ad sets / 117 ads / ₹18,507.31 INR. Piyush (`cl_piyush-ahuja`,
+`act_1377451727314532`): re-pulled to 367 ads / ₹67,606.28. All 8 accounts
+read OK from Meta; G1 non-regression held (`act_…2164 → cl_upcurvv`). New
+data fixed point: **ad=4202 / adSet=1343 / spend=4202, 8 clients** (supersedes
+the 3857 point — the delta is exactly the onboarding writes; WAL stands).
+
+**Pull-on-refresh + preloader (the code half):**
+- `POST /api/meta/refresh` (NEW, `pull_meta`-gated like the existing
+  `POST /api/meta/pull`): the dashboard's preloader calls it on mount
+  (i.e. EVERY browser refresh) + on the existing 60 s tick. Server rules:
+  - **specific ad-account filter** → a REAL Meta pull of that account,
+    targeted at the account's OWNER client (in the all-clients view the
+    selected account belongs to its own client, not `resolveClient("all")`),
+    gated by the single-writer pull lock (`acquirePullLock` — it can NEVER
+    parallelize the 10-min tick / manual pull, the D-05 §3 rule) and a
+    per-account **5-min min-interval throttle** (in-memory `lastRealPull`
+    map; `REFRESH_PULL_MIN_MS` overrides) so a refresh loop can't burn Meta
+    quota.
+  - **"all clients" aggregate view** → auto-refresh does NOT pull the whole
+    8-account fleet (that's minutes of Meta calls held open behind a
+    spinner); it re-reads the DB the scheduler already keeps fresh. A
+    `force:true` "Pull now" button pulls (G1 default account, or the
+    selected client's accounts) and bypasses the throttle.
+  - no token / simulate mode → honest `{pulled:false, reason}` no-op, never
+    a fake pull; a Meta 4xx/403 on the account returns `{pulled:true,
+    failed:true, errors[]}` so the preloader shows the real error, not a
+    fake "updated".
+- `DataPreloader` (NEW, dashboard-wired): while a real pull is in flight
+  (≥2 s) a FULL-SCREEN overlay ("Pulling fresh data from Meta… + live
+  seconds") blocks the view so half-loaded numbers are never read; on
+  resolve it flashes "✓ Data up to date (just pulled)" (or the honest skip
+  / error note), `router.refresh()`es the server component with the
+  just-pulled data, and closes. A slim sticky strip under the Topbar
+  always shows the strip state + the manual **Pull now** button.
+
+**Guardrails honoured:** the pull path reuses the EXISTING
+`pullAllAccounts` + `acquirePullLock` primitives (no second Meta path, no
+new quota class); throttle + lock mean a 60 s refresh tick is bounded to
+one real pull per account per 5 min (force-bypass is an explicit user
+act); `.env` / `dev.db` / `.next` / scratch stay out of commits;
+typecheck 0 · build 0 · full suite green (D-22 added no test — the route
+delegates to the lock + pull primitives both already covered by
+`test/pull-lock.test.ts` + the D-04 onboarding tests, and the preloader is
+a client overlay with no data logic).
