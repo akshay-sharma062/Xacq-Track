@@ -1667,3 +1667,84 @@ reviews + pushes per the standing rule.
 the preloader shows a live pull, and Tejasvvita + Piyush's numbers
 update; a slow account past 90 s shows the honest "running in the
 background" note and its data lands on the next refresh.**
+
+## D-23 — dedicated Lovable + TagMango platform-leads tabs via a shared platform-leads module (2026-11-24) [REVIEW]
+
+**The ask:** Lovable + TagMango get dedicated receipt-level tabs the way
+the Flexi Leads tab exists — through a SHARED platform-leads module
+(not 3 copies of flexiLeads.ts). The three raw shapes differ:
+flexifunnels + lovable are FLAT (D-19 `flexiFormFieldsFromRaw`
+extractor reuse); tagmango is NESTED (`{ event, order:{…} }`).
+
+**What landed:**
+- `src/lib/platformLeads.ts` (NEW) — the shared
+  `platformLeadsReport(platform, clientIds, adAccountId?, session)`
+  core + the 3 `PlatformFieldSpec` objects (`PLATFORM_SPECS`).
+  FlexiFunnels reuses the D-19 flat extractor + the exact pre-D-23
+  chip-exclusion set (byte-for-byte regression-free); Lovable is the
+  flat registration form (a form POST is `registered`, NEVER a
+  payment — value/txn always null, D-21 contract); TagMango reads
+  `order.*` (identity) + `order.amount` (value) + `order.id` (txn) +
+  the top-level `event` (kind: completed → payment_success, refunded
+  → refund, started → "other"/checkout). PII guard: phone- /
+  email-LOOKING custom answers are masked for a `maskPhone` role
+  (never a raw PII leak through a "form answer").
+- `src/lib/flexiLeads.ts` — now a THIN WRAPPER: `flexiLeadsReport` =
+  `platformLeadsReport(platform:"flexifunnels")`, public types
+  re-exported as aliases (the old call sites + the existing
+  `test/flexiLeads.test.ts` are unchanged).
+- `src/app/components/PlatformLeadsView.tsx` (NEW) — the ONE shared
+  screen (server component): session/client-set/ad-account resolution
+  like the original flexi page; Topbar's existing `?adAccount=`
+  dropdown = the filter (zero new filter UI); AutoRefresh 60 s; the
+  KPI row; the receipt table (the event badge gains a value+txn line
+  for the nested platform); the raw-payload `<details>`; the two-case
+  empty state.
+- `src/app/lovable-leads/page.tsx` + `src/app/tagmango-leads/page.tsx`
+  (NEW, thin) + `src/app/flexi-leads/page.tsx` refactored onto the
+  shared view.
+- `Sidebar` — "Lovable Leads" + "TagMango Leads" in the Reports
+  section, next to "Flexi Leads".
+
+**No new adapter (the ticket's verify step):** `lovable` was already
+registered in D-21 (`fb47ee5`: `ADAPTERS.lovable` + `UNSIGNED_ONLY` +
+the extractor reuse) — verified present, receipts parse; nothing
+added.
+
+**Guardrails honoured:** NO schema change (every value already on
+disk — `WebhookLog.rawPayload`, `Event.rawPayload.meta`, `Lead`,
+`Touchpoint`, Ad/AdSet/AdAccount); the module is READ-ONLY (writes
+nothing — no pull-row/fixed-point writes; WAL stands, one DB writer,
+no `next dev` next to prod); PII masked per the existing `maskPhone`
+rule + the PII-looking custom-answer mask for masked roles;
+`.env`/`dev.db`/`.next`/scratch stay out of the commit.
+
+**Tests:** `test/platformLeads.test.ts` — 11/11 green at the freshDb
+boundary (tagmango's 3 event kinds + value/txn from `order.*`; lovable
+flat registration → identity + UTM + registered + never a payment;
+the shared ad-account filter — a UTM ad-set match is kept for that
+account and excluded for another, unmatched dropped when filtered and
+counted in the KPI when unfiltered; the unparseable-body honest row;
+maskPhone on all 3 platforms). The existing `test/flexiLeads.test.ts`
+stays green through the thin wrapper (no regression). Full suite
+green; `typecheck` 0; `build` exit 0.
+
+**Live proof (ticket b/c):** on the running prod build,
+`/tagmango-leads` shows **18** live receipts (the ticket's
+`tagmango=18`), `/lovable-leads` shows **2** (the ticket's
+`lovable=2`), and `/flexi-leads` still renders with **287 total /
+200-row default page + 151 unique leads** — the pre-D-23 numbers, no
+regression. The `?adAccount=` filter is honored on all three (the
+honest empty state + the "0 while filtered, N unmatched hidden"
+KPI).
+
+**Commit:** ONE `[REVIEW]` commit (the shared module + the thin
+wrapper + the shared view + the 2 new thin routes + the flexi page
+refactor + the Sidebar + 11 new tests; the lovable adapter was NOT
+added — D-21's is present) — local only, the PO reviews + pushes per
+the standing rule.
+
+**Next gate = drive 1 real TagMango order (or Lovable hand-wired form
+POST) through the live tunnel → the receipt lands in that platform's
+tab with its UTM/attribution resolved; the ad-account filter + the
+raw-payload expand are already proven on the live 18 + 2 receipts.**

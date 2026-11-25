@@ -1814,3 +1814,82 @@ act); the 90 s caps bound both the request open-time AND the UI
 wait-time without canceling the background write; `.env` / `dev.db` /
 `.next` / scratch stay out of commits; typecheck 0 · build 0 · full
 suite green.
+
+## D-23 — dedicated platform-leads tabs for Lovable + TagMango via a shared platform-leads module (2026-11-24)
+
+**The ask:** Lovable + TagMango get dedicated receipt-level tabs the same
+way the Flexi Leads tab exists — but through a SHARED platform-leads
+module, not 3 copies of flexiLeads.ts.
+
+**The key design fact:** the three platforms have DIFFERENT raw shapes —
+flexifunnels + lovable are FLAT (a registration-form POST; identity +
+UTMs + custom answers at the top level, reuse the D-19
+`flexiFormFieldsFromRaw` extractor), tagmango is NESTED
+(`{ event, order:{ id, amount, product, email, phone } }` → identity from
+`order.*`, value from `order.amount`, txn from `order.id`, kind from the
+top-level `event`). So the per-platform reading is isolated in a tiny
+`PlatformFieldSpec` object; everything else (ad-account attribution, the
+ad-account filter, KPIs, receipt table, PII masking) is SHARED and
+platform-independent.
+
+**What was built:**
+- `src/lib/platformLeads.ts` (NEW) — the shared `platformLeadsReport(
+  prisma, { platform, clientIds, adAccountId?, session, limit? })` core +
+  the 3 field specs (`PLATFORM_SPECS`: flexifunnels / lovable / tagmango):
+  - **flexifunnels** reuses `flexiFormFieldsFromRaw` (the D-19 one-
+    source-of-truth extractor — the report + adapter + lead-view card
+    never re-derive the shape) with the exact pre-D-23 chip-exclusion
+    set (page-context / UTM-extra keys stay out of the chips), so
+    `/flexi-leads` is byte-for-byte regression-free;
+  - **lovable** — the flat registration form (D-21): a form POST is a
+    `registered` lead, NEVER a payment (value/txn are always null),
+    page-context keys are Lovable's own flat names (`referrer`,
+    `page_url`, …);
+  - **tagmango** — the nested order envelope: `order.completed` →
+    payment_success, `order.refunded` → refund, `order.started` →
+    "other" (a CHECKOUT, never a payment); `order.*` fields other than
+    identity/value/txn surface as chips (e.g. `product`).
+  - PII guard: for a `maskPhone` role, phone- / email-LOOKING values in
+    the custom answers are masked too (the ticket's "custom answers
+    shown as-captured EXCEPT values that look like PII" rule) — never a
+    raw phone leak through a "form answer".
+- `src/lib/flexiLeads.ts` — now a THIN wrapper: `flexiLeadsReport` =
+  `platformLeadsReport(platform:"flexifunnels")`; the public types
+  (`FlexiLeadRow`, …) are re-exported aliases, so the old call sites +
+  tests are unchanged.
+- `src/app/components/PlatformLeadsView.tsx` (NEW) — the ONE shared
+  screen (server component): session/client-set/ad-account resolution
+  exactly like the original flexi page, Topbar (the existing
+  `?adAccount=` dropdown = the filter, zero new filter UI), AutoRefresh
+  60 s, KPI row, receipt table (the event badge gains the value+txn
+  line for nested platforms) + the raw-payload `<details>`, and the two
+  empty states.
+- `src/app/lovable-leads/page.tsx` + `src/app/tagmango-leads/page.tsx`
+  (NEW) — thin routes, each one `<PlatformLeadsView platform=… sp=…/>`;
+  `src/app/flexi-leads/page.tsx` refactored onto the same view.
+- `Sidebar` — two Reports-section entries next to "Flexi Leads".
+
+**No new adapter needed:** `lovable` was already registered in D-21
+(`fb47ee5`: `ADAPTERS.lovable` + `UNSIGNED_ONLY` + the extractor
+reuse), so the ticket's "verify + add if missing" step verified
+present — receipts parse.
+
+**Guardrails honoured:** NO schema change (every value already on disk:
+`WebhookLog.rawPayload`, `Event.rawPayload.meta`, `Lead`, `Touchpoint`,
+Ad/AdSet/AdAccount); the module is READ-ONLY (writes nothing — no
+pull-row/fixed-point writes; WAL stands, one writer, no `next dev`
+next to prod); `.env`/`dev.db`/`.next`/scratch stay out of the commit;
+phone/email masked per the existing `maskPhone` rule + the PII-looking
+custom-value mask for masked roles.
+
+**Tests** (`test/platformLeads.test.ts`, 11 cases at the freshDb
+boundary): tagmango order.completed/refunded/started → the 3 kinds +
+value/txn from `order.*`; lovable flat registration → identity + UTM
++ registered (never a payment); flexi parity through the shared
+builder; the ad-account filter (a UTM ad-set match is kept for that
+account, excluded for another; unmatched dropped when filtered,
+counted in the KPI when unfiltered); an unparseable body → an honest
+row (no crash); maskPhone on all 3 platforms (identity + lead +
+PII-looking custom answers; as-captured for an unmasked role). The
+existing `test/flexiLeads.test.ts` stays green through the thin
+wrapper (no regression).

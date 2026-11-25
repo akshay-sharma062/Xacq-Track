@@ -20,6 +20,8 @@ const NAV: Item[] = [
   { section: "Reports", label: "", href: "#", dot: undefined } as unknown as Item,
   { href: "/reports", label: "Reports", section: "Reports" },
   { href: "/flexi-leads", label: "Flexi Leads", section: "Reports" },
+  { href: "/lovable-leads", label: "Lovable Leads", section: "Reports" },
+  { href: "/tagmango-leads", label: "TagMango Leads", section: "Reports" },
   { section: "Integrations", label: "", href: "#", dot: undefined } as unknown as Item,
   { href: "/integrations", label: "Integrations hub", section: "Integrations" },
   { href: "/meta", label: "Meta pull + CAPI", section: "Integrations" },
