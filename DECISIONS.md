@@ -1893,3 +1893,87 @@ row (no crash); maskPhone on all 3 platforms (identity + lead +
 PII-looking custom answers; as-captured for an unmasked role). The
 existing `test/flexiLeads.test.ts` stays green through the thin
 wrapper (no regression).
+
+## D-24b — CashFree + Lovable cross-platform attribution: a CashFree receipt inherits the matched lead's UTM + ad account (2026-11-26)
+
+**The ask (the PO's exact complaint):** the Lovable connection shows
+receipts with UTM + ad account resolved; the CashFree connection shows
+"no events yet". When a Lovable-sourced lead pays via CashFree, that
+payment receipt must ALSO show the lead's UTM + ad account (not blank).
+`platformLeadsReport` read UTM from the PAYLOAD only; CashFree payloads
+carry no UTM of their own, so every CashFree receipt showed "no UTM /
+organic · unmatched".
+
+**What landed (all in the D-23 shared builder — no new screen copies):**
+- `CASHFREE_SPEC` (NEW in `src/lib/platformLeads.ts`): identity from
+  customer details (defensively reads BOTH the G4-era camelCase shape
+  already on disk AND the real Cashfree snake_case nested shape
+  `data.payment`/`data.order`/`data.customer_details`), the event kind
+  from the status/type (`PAID`→purchase, `FAILED`/`USER_DROPPED`→payment
+  failed, `REFUNDED`→refund), the value in **RUPEES** (real Cashfree is
+  two-decimal rupees, not paise — a 100× revenue-KPI trap), the txn id
+  from the gateway's own `cf_payment_id`/`cf_refund_id` (the ingest dedup
+  key) → G4 flat `transactionId` → order ids.
+- **D-24b task 1 (CashFree UTM, two sources, fallback order):**
+  1. `raw.notes` (a JSON object OR a JSON string — the task-5 PO spec;
+     parsed by the now-exported `notesRecord` helper shared with the
+     Razorpay adapter) → UTM source = **"notes"**;
+  2. else the matched lead's MOST RECENT UTM-carrying Touchpoint at or
+     before the receipt (batched in a new Pass 1.5, gated on the new
+     `spec.inheritLeadUtm` flag — cashfree-only) → UTM source = **"lead"**;
+  3. else nothing — the row's UTM stays empty (honest "—", never faked).
+- **D-24b task 2 (cross-platform ad-account inheritance):** the
+  inherited UTM re-runs the SHARED UTM ad-account match (path 1) BEFORE
+  the meta-touchpoint fallback (Pass 2), so a Lovable lead's CashFree
+  payment resolves to the SAME ad account the lead's original ad-click
+  came from — proven by the cross-consistency test (the inherited ad-set
+  id's account == the lead's ad-click touchpoint's account, via "utm"
+  not "meta_touchpoint").
+- **D-24b task 3 (the indicator + the tab):** the receipt row gains
+  `utmOrigin` ("notes"/"lead"/undefined→"—"), shown ONLY on the
+  CashFree tab (the other platforms carry native UTM — the indicator
+  would be noise there): a "UTM inherited from lead's touchpoint"
+  badge / a "UTM from notes" badge / an honest "UTM: —". The `/cashfree-leads`
+  tab (a thin route over the same shared view) + the Sidebar entry are
+  NEW — D-23 shipped only the Lovable + TagMango tabs.
+- **D-24b task 4 (the "no events yet" diagnosis):** the CashFree empty
+  state is now diagnostic — the 3 causes the PO checks, rendered ONLY on
+  the cashfree platform: (1) CashFree dashboard webhook URL is not
+  pointed at this connection's inboundUrl ("—" in last-received means
+  never received), (2) the webhook signing secret doesn't match — the
+  verifying secret is the connection's `endpointSecret` (D-13), i.e.
+  `CASHFREE_WEBHOOK_SECRET` provisioned on the connection, so a
+  mismatch → "verification failed" in the log, not "no events", (3)
+  simply no live CashFree payment has been made yet (0 events = 0
+  payments, not a bug).
+- **D-24b task 5 (the PO's checkout-side spec — NOT built, just
+  specified):** the FML New checkout (FlexiFunnels/Pabbly stack, outside
+  this repo) must pass UTM into Cashfree `notes` at payment creation:
+  `notes: JSON.stringify({ utm_source, utm_medium, utm_campaign,
+  utm_term, utm_content, utm_id, phone, email, name })`. Until it does,
+  task 1's lead-touchpoint fallback covers the UTM.
+
+**Guardrails honoured:** READ-ONLY (Pass 1.5 + the new spec write
+nothing — no pull rows, no fixed-point writes, WAL stands, one DB
+writer, no `next dev` next to prod); PII — the inherited UTM + ad
+account come from already-stored Touchpoints, and the custom-field
+phone/email-looking mask (spec 5.10) still applies per session; no
+`.env`/`dev.db`/`.next`/scratch in the commit; the existing Lovable /
+TagMango / FlexiFunnels tabs are untouched (the inherit pass is
+gated on `spec.inheritLeadUtm`, cashfree-only — the D-23 11 tests +
+the `flexiLeads` wrapper suite stay green; the D-23 spec-table test
+updated from "all 3" to "all 4").
+
+**Tests** (`test/cashfree.test.ts`, 5 cases at the freshDb boundary +
+the updated `PLATFORM_SPECS` case in `test/platformLeads.test.ts`):
+case 1+4 the cross-consistency proof (a no-notes receipt matched to a
+Lovable lead → the lead's Touchpoint UTM + the SAME ad account as the
+lead's ad-click touchpoint, attribution "utm", `utmOrigin="lead"`);
+case 2 notes UTM wins over the lead's touchpoint (`utmOrigin="notes"`;
+the notes-only term matches no pulled ad → honestly "unmatched", not
+guessed); case 3 no notes + no lead → empty UTM + "unmatched" + no
+indicator (never faked); the REAL nested Cashfree payload shape
+(`data.payment`/`order`/`customer_details`) parses — value in rupees,
+txn from `cf_payment_id`, kind from `PAYMENT_SUCCESS_WEBHOOK`; the
+/cashfree-leads empty-state 3-cause note + the indicator are asserted
+on the view source (the D-22/D-12 source-contract precedent).

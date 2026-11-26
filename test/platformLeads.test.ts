@@ -327,11 +327,11 @@ describe("flexiLeadsReport — the thin wrapper (no regression)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// The spec table is complete (all 3 platforms ship a spec).
+// The spec table is complete (all 4 platforms ship a spec).
 // ---------------------------------------------------------------------------
-describe("PLATFORM_SPECS — all 3 platforms ship a field spec", () => {
-  it("flexifunnels + lovable + tagmango each have identity + eventKind + (value/txn where applicable)", () => {
-    expect(Object.keys(PLATFORM_SPECS).sort()).toEqual(["flexifunnels", "lovable", "tagmango"]);
+describe("PLATFORM_SPECS — all 4 platforms ship a field spec", () => {
+  it("flexifunnels + lovable + tagmango + cashfree each have identity + eventKind + (value/txn where applicable)", () => {
+    expect(Object.keys(PLATFORM_SPECS).sort()).toEqual(["cashfree", "flexifunnels", "lovable", "tagmango"]);
     for (const spec of Object.values(PLATFORM_SPECS)) {
       expect(typeof spec.identityFromPayload).toBe("function");
       expect(typeof spec.eventKindFromPayload).toBe("function");
@@ -341,5 +341,8 @@ describe("PLATFORM_SPECS — all 3 platforms ship a field spec", () => {
     expect(typeof PLATFORM_SPECS.tagmango.valueFromPayload).toBe("function");
     expect(typeof PLATFORM_SPECS.tagmango.txnIdFromPayload).toBe("function");
     expect(PLATFORM_SPECS.lovable.valueFromPayload!({})).toBeNull();
+    // D-24b: cashfree is the UTM-inheriting payment platform (task 1 step 2).
+    expect(PLATFORM_SPECS.cashfree.inheritLeadUtm).toBe(true);
+    expect(typeof PLATFORM_SPECS.cashfree.valueFromPayload).toBe("function");
   });
 });

@@ -24,7 +24,7 @@
  */
 import { PrismaClient } from "@prisma/client";
 import { maskPhone, Session } from "./session";
-import { flexiFormFieldsFromRaw } from "./adapters/payments";
+import { flexiFormFieldsFromRaw, notesRecord } from "./adapters/payments";
 
 export type PlatformEventKind =
   | "registered"
@@ -58,6 +58,13 @@ export interface PlatformLeadRow {
     sourceUnknown: boolean;
   } | null;
   utm: { source?: string; medium?: string; campaign?: string; content?: string; term?: string; id?: string };
+  /** D-24b — WHERE this row's UTM came from (cashfree receipts):
+   *  "notes" = the payload's own `notes` (the checkout passed UTM in, task 5);
+   *  "lead" = inherited from the matched lead's most recent UTM-carrying
+   *  Touchpoint (the cross-platform fallback, task 1); undefined = no UTM
+   *  available (honest "—", never faked). Cashfree-only (the other platforms
+   *  carry UTM in their native payload, so the indicator would be noise). */
+  utmOrigin?: "notes" | "lead";
   /** UTM-extra keys with no Touchpoint column (carried in meta) — platform
    *  specific (FlexiFunnels `utm_flow`); undefined for the others. */
   utmFlow?: string;
@@ -119,9 +126,14 @@ export interface PlatformFieldSpec {
   utmFlowFromPayload?: (raw: Record<string, unknown>) => string | undefined;
   /** The Meta ad-click id (the receipt carries fbclid in the UTM params). */
   fbclidFromPayload?: (raw: Record<string, unknown>) => string | undefined;
+  /** D-24b — when the payload carries NO UTM, inherit the matched lead's most
+   *  recent UTM-carrying Touchpoint's UTM (cross-platform attribution). The
+   *  inherited UTM then resolves the ad account through the SAME shared
+   *  UTM match (path 1) before the meta_touchpoint fallback (path 2). */
+  inheritLeadUtm?: boolean;
 }
 
-export type PlatformLeadsPlatform = "flexifunnels" | "lovable" | "tagmango";
+export type PlatformLeadsPlatform = "flexifunnels" | "lovable" | "tagmango" | "cashfree";
 
 // ---------------------------------------------------------------------------
 // Shared small helpers
@@ -297,11 +309,94 @@ const TAGMANGO_SPEC: PlatformFieldSpec = {
   },
 };
 
+// --- Cashfree: the PAYMENT gateway (D-24b). Cashfree payment webhooks carry
+//     NO UTM of their own — the UTM either (1) arrives in the payload's
+//     `notes` (the checkout side passes it in, task 5's PO spec — `notes` is
+//     a JSON object or a JSON string; the real Cashfree payload also echoes
+//     custom tags under `order_tags`) or (2) is INHERITED from the matched
+//     lead's most recent UTM-carrying Touchpoint (the `inheritLeadUtm` flag
+//     below — task 1 step 2). When the payload has no notes-UTM and no
+//     inheritable touchpoint UTM, the row's UTM stays empty (honest "—",
+//     never faked). Defensively reads BOTH the real Cashfree shape
+//     (snake_case nested under `data`: order/payment/customer_details) and
+//     the G4-era camelCase shape already on disk (data.transactionId/…).
+const CASHFREE_SPEC: PlatformFieldSpec = {
+  inheritLeadUtm: true,
+  identityFromPayload: (raw) => {
+    const d = (raw.data ?? raw) as Record<string, unknown>;
+    const c = (d.customerDetails ?? d.customer_details ?? {}) as Record<string, unknown>;
+    return {
+      name: strOrNull(c.name, c.customer_name),
+      phone: firstStr(c.phone, c.customer_phone) ?? "",
+      email: strOrNull(d.customerEmail, c.customer_email),
+      city: strOrNull(c.city, c.customer_city),
+    };
+  },
+  eventKindFromPayload: (raw) => {
+    const d = (raw.data ?? raw) as Record<string, unknown>;
+    const type = String((raw as any).type ?? "").toUpperCase(); // real: PAYMENT_SUCCESS_WEBHOOK, …
+    const status = String(d.status ?? d.payment_status ?? d.refund_status ?? "").toUpperCase();
+    if (type.startsWith("REFUND") || status === "REFUNDED" || status === "REFUND_SUCCESS") return "refund";
+    if (type.startsWith("PAYMENT_FAILED") || type.startsWith("PAYMENT_USER_DROPPED") || status === "FAILED" || status === "USER_DROPPED") return "payment_failed";
+    if (type.startsWith("PAYMENT_SUCCESS") || status === "PAID" || status === "SUCCESS") return "payment_success";
+    return "other"; // PENDING + anything unrecognised
+  },
+  valueFromPayload: (raw) => {
+    const d = (raw.data ?? raw) as Record<string, unknown>;
+    const p = (d.payment ?? {}) as Record<string, unknown>;
+    const r = (d.refund ?? {}) as Record<string, unknown>;
+    const o = (d.order ?? {}) as Record<string, unknown>;
+    // Real Cashfree amounts are in RUPEES (two decimals), not paise. Refund
+    // rows read refund_amount; payment rows read payment_amount (→ G4 flat
+    // amount / order_amount fallbacks).
+    return numOrNull(r.refund_amount, p.payment_amount, d.amount, o.order_amount);
+  },
+  txnIdFromPayload: (raw) => {
+    const d = (raw.data ?? raw) as Record<string, unknown>;
+    const p = (d.payment ?? {}) as Record<string, unknown>;
+    const r = (d.refund ?? {}) as Record<string, unknown>;
+    const o = (d.order ?? {}) as Record<string, unknown>;
+    // Prefer the gateway's own id (cf_payment_id / cf_refund_id — the ingest
+    // dedup key) → the G4 flat transactionId → order ids.
+    return strOrNull(r.cf_refund_id, r.refund_id, p.cf_payment_id, d.transactionId, o.order_id, d.orderId);
+  },
+  utmFromPayload: (raw) => {
+    // Task 1 step 1: UTM from `raw.notes` (object or a JSON string — the
+    // notesRecord parser handles both; the checkout side must pass it in,
+    // the task-5 PO spec). The real Cashfree payload's `order_tags` (a
+    // plain object of merchant custom tags) is a defensive alias — notes
+    // wins when both carry the same key.
+    const d = (raw.data ?? raw) as Record<string, unknown>;
+    const o = (d.order ?? {}) as Record<string, unknown>;
+    const notes = notesRecord((raw as any).notes ?? d.notes);
+    const tags = ((o.order_tags ?? d.order_tags ?? {}) as Record<string, unknown>);
+    const pick = (k: string): string | undefined => firstStr(notes[k], tags[k]);
+    // Only-truthy keys, so an UTM-less payload yields {} (the honest
+    // "no UTM" case the inherit pass + the "—" indicator key off of).
+    const out: Record<string, string | undefined> = {};
+    for (const [key, field] of [["source", "utm_source"], ["medium", "utm_medium"], ["campaign", "utm_campaign"], ["content", "utm_content"], ["term", "utm_term"], ["id", "utm_id"]] as const) {
+      const v = pick(String(field));
+      if (v) out[key] = v;
+    }
+    return out;
+  },
+  customFields: (raw) => {
+    const d = (raw.data ?? raw) as Record<string, unknown>;
+    const o = (d.order ?? {}) as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+    const desc = firstStr(d.description, o.order_note, (d as any).product);
+    if (desc) out.product = desc;
+    return out;
+  },
+  fbclidFromPayload: undefined, // Cashfree payments carry no fbclid of their own
+};
+
 /** The registered field specs, keyed by the WebhookLog.platform value. */
 export const PLATFORM_SPECS: Record<PlatformLeadsPlatform, PlatformFieldSpec> = {
   flexifunnels: FLEXI_SPEC,
   lovable: LOVABLE_SPEC,
   tagmango: TAGMANGO_SPEC,
+  cashfree: CASHFREE_SPEC,
 };
 
 // ---------------------------------------------------------------------------
@@ -433,6 +528,71 @@ export async function platformLeadsReport(
     };
     rows.push(row);
     rowLeadIds.set(rows.length - 1, leadId); // parallel map — the lead a receipt ingested
+  }
+
+  // --- Pass 1.5 (D-24b): UTM inheritance from the matched lead's own
+  //     touchpoints, for platforms whose payload carries no UTM of its own
+  //     (Cashfree — `spec.inheritLeadUtm`). Fallback order (task 1):
+  //       1. the payload's own `notes` UTM (checkout passed it in) → "notes";
+  //       2. else the matched lead's MOST RECENT UTM-carrying Touchpoint at
+  //          or before the receipt (a Lovable lead's original form
+  //          submission) → "lead";
+  //       3. else nothing (honest "—", never faked).
+  //     The inherited UTM then re-runs the shared UTM ad-account match
+  //     (path 1) so a cross-platform payment resolves to the SAME ad account
+  //     as the lead's original ad-click — before the meta-touchpoint
+  //     fallback (pass 2) below.
+  const UTM_KEYS = ["source", "medium", "campaign", "content", "term", "id"] as const;
+  if (spec.inheritLeadUtm) {
+    const inherit: { i: number; leadId: string; atMs: number }[] = [];
+    rows.forEach((r, i) => {
+      const hasPayloadUtm = UTM_KEYS.some((k) => (r.utm as unknown as Record<string, unknown>)[k]);
+      if (hasPayloadUtm) { r.utmOrigin = "notes"; return; } // the payload's own UTM wins
+      const lid = rowLeadIds.get(i);
+      if (lid) inherit.push({ i, leadId: lid, atMs: new Date(r.receivedAt).getTime() });
+    });
+    if (inherit.length) {
+      const inheritLeadIds = [...new Set(inherit.map((n) => n.leadId))];
+      const tps = await prisma.touchpoint.findMany({
+        where: {
+          leadId: { in: inheritLeadIds },
+          OR: [
+            { utmSource: { not: null } }, { utmMedium: { not: null } }, { utmCampaign: { not: null } },
+            { utmContent: { not: null } }, { utmTerm: { not: null } },
+          ],
+        },
+        select: { leadId: true, timestamp: true, utmSource: true, utmMedium: true, utmCampaign: true, utmContent: true, utmTerm: true },
+        orderBy: { timestamp: "desc" }, // most recent first — pick the newest one at/before the receipt
+      });
+      for (const { i, leadId, atMs } of inherit) {
+        const t = tps.find((tp) => tp.leadId === leadId && tp.timestamp.getTime() <= atMs);
+        if (!t) continue; // nothing at/before the payment → stays honest "—"
+        const inherited = {
+          source: t.utmSource ?? undefined,
+          medium: t.utmMedium ?? undefined,
+          campaign: t.utmCampaign ?? undefined,
+          content: t.utmContent ?? undefined,
+          term: t.utmTerm ?? undefined,
+        };
+        if (!Object.values(inherited).some(Boolean)) continue;
+        const r = rows[i];
+        r.utm = inherited;
+        r.utmOrigin = "lead";
+        // Re-run the UTM ad-account match (path 1) on the inherited UTM —
+        // the inherited ad-set/ad id resolves the SAME account the lead's
+        // ad-click came from (task 2's cross-consistency).
+        if (r.attribution === "unmatched") {
+          for (const cand of [inherited.term].filter((v): v is string => Boolean(v))) {
+            const hit = idToAcct.get(cand);
+            if (hit) {
+              r.adAccount = { id: hit, name: acctName.get(hit) ?? hit };
+              r.attribution = "utm";
+              break;
+            }
+          }
+        }
+      }
+    }
   }
 
   // --- Pass 2: the Meta-touchpoint fallback, batched for the still-unmatched.

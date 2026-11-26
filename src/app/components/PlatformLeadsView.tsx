@@ -33,6 +33,7 @@ export const PLATFORM_LEADS_META: Record<
   flexifunnels: { title: "Flexi Leads", provider: "FlexiFunnels" },
   lovable: { title: "Lovable Leads", provider: "Lovable" },
   tagmango: { title: "TagMango Leads", provider: "TagMango" },
+  cashfree: { title: "CashFree Leads", provider: "CashFree" },
 };
 
 /** The single reusable screen body. `sp` = the page's `qs(searchParams)`
@@ -80,6 +81,11 @@ export async function PlatformLeadsView({
   const adAccountName = adAccountId
     ? (await prisma.adAccount.findUnique({ where: { id: adAccountId } }))?.name ?? null
     : null;
+
+  // D-24b: the Cashfree "no events yet" is usually a configuration problem,
+  // not a code bug — show the PO the exact 3 things to check so the empty
+  // state is diagnostic instead of dead-end.
+  const showNoReceiptsChecklist = platform === "cashfree";
 
   return (
     <>
@@ -130,6 +136,14 @@ export async function PlatformLeadsView({
                   No {meta.provider} webhooks received yet — receipts land here
                   automatically the moment a {meta.provider} webhook hits the
                   connection (auto-refresh every 60 s).
+                  {showNoReceiptsChecklist && (
+                    <div className="faint" style={{ marginTop: 8, fontSize: 12 }}>
+                      No CashFree receipts yet. Check: (1) CashFree dashboard
+                      webhook URL is set to this connection&apos;s inboundUrl,
+                      (2) the webhook signing secret matches CASHFREE_WEBHOOK_SECRET,
+                      (3) a live payment has been made.
+                    </div>
+                  )}
                 </td>
               </tr>
             )}
@@ -143,7 +157,7 @@ export async function PlatformLeadsView({
               </tr>
             )}
             {rep.rows.map((r) => (
-              <PlatformRow key={r.logId} row={r} />
+              <PlatformRow key={r.logId} row={r} showUtmOrigin={platform === "cashfree"} />
             ))}
           </tbody>
         </table>
@@ -154,9 +168,19 @@ export async function PlatformLeadsView({
 
 // ---------------------------------------------------------------------------
 
-function PlatformRow({ row: r }: { row: PlatformLeadRow }) {
+function PlatformRow({
+  row: r,
+  showUtmOrigin,
+}: {
+  row: PlatformLeadRow;
+  /** D-24b: cashfree-only — show where this row's UTM came from (the payload's
+   *  own `notes` vs inherited from the matched lead's Touchpoint vs "—"). */
+  showUtmOrigin?: boolean;
+}) {
   const utmLine = [r.utm.source, r.utm.medium, r.utm.campaign].filter(Boolean).join(" › ");
   const chips = Object.entries(r.custom);
+  // D-24b: the UTM source indicator — "notes" | "lead" | "—" (never blank).
+  const utmSourceLabel = r.utmOrigin === "notes" ? "notes" : r.utmOrigin === "lead" ? "lead" : "—";
   return (
     <tr>
       <td style={{ whiteSpace: "nowrap" }}>
@@ -225,6 +249,23 @@ function PlatformRow({ row: r }: { row: PlatformLeadRow }) {
           </div>
         ) : (
           <span className="faint">no UTM</span>
+        )}
+        {showUtmOrigin && (
+          <div style={{ marginTop: 2 }}>
+            {r.utmOrigin === "lead" ? (
+              <span className="badge warn" title="UTM inherited from the matched lead's Touchpoint (cross-platform attribution, D-24b)" style={{ fontSize: 10 }}>
+                UTM inherited from lead&apos;s touchpoint
+              </span>
+            ) : r.utmOrigin === "notes" ? (
+              <span className="badge accent" title="UTM passed natively in the Cashfree payload's notes (checkout side, task 5)" style={{ fontSize: 10 }}>
+                UTM from notes
+              </span>
+            ) : (
+              <span className="faint mono" title="No UTM available from the payload or the lead's touchpoints" style={{ fontSize: 10 }}>
+                UTM: {utmSourceLabel}
+              </span>
+            )}
+          </div>
         )}
         <div className="mono faint" style={{ fontSize: 10 }}>
           {[`term ${r.utm.term}`.trim(), `id ${r.utm.id}`.trim()].filter((v) => v !== "term" && v !== "id").join(" · ")}

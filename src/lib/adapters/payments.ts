@@ -21,7 +21,7 @@ function safeEqual(a: string, b: string): boolean {
   return ba.length === bb.length && timingSafeEqual(ba, bb);
 }
 
-function notesRecord(notes: unknown): Record<string, string> {
+export function notesRecord(notes: unknown): Record<string, string> {
   if (typeof notes === "string") {
     try { return JSON.parse(notes); } catch { return {}; }
   }
