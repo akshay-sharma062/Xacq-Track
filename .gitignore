@@ -105,3 +105,6 @@ pnpm-debug.log*
 
 # D-19/D-19b scratch evidence (backfill run log; distilled findings in DECISIONS D-19)
 .d19-*
+
+# D-25 scratch evidence (clean-test-data dry-run / apply report; distilled findings in DECISIONS D-25)
+.d25-*

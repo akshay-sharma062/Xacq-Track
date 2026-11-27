@@ -1836,3 +1836,62 @@ CashFree through the live connection → the CashFree receipt lands on
 /cashfree-leads with the lead's UTM + ad account inherited (the
 "lead" source badge), NOT "organic / unmatched"; the Lovable tab
 still shows the lead's own UTM (no regression).**
+
+## D-25 — clean test/replay data from the DB: 2-layer safe/scoped delete, pull rows untouched (2026-11-27) [normal commit]
+
+**The ask:** remove the test/replay ingest data that pollutes the
+dashboard, safely — a dry-run first, a confirmed delete after PO
+approval, and the G1/G4 pull rows (Ad / AdSet / AdCampaign / Creative /
+Spend / FxRate / LiveRange) never touched.
+
+**The tool** — `scripts/clean-test-data.ts`, wired as
+`pnpm clean:test-data` (`.d25-dryrun.txt` gitignored):
+- **Layer 1 (dry-run, default, writes 0):** identifies the test sets and
+  lists them to `.d25-dryrun.txt` (count + first-5 samples, phones last-4),
+  ending with the exact delete plan + a "run `pnpm clean:test-data --apply`"
+  line.
+- **Layer 2 (`--apply`, PO-gated, local-only):** re-identifies the same
+  sets, prompts the PO to type exactly `DELETE CONFIRMED` on stdin, then in
+  ONE transaction writes an `AuditLog` row FIRST (`action=delete`,
+  `entity=clean_test_data`, `entityId=d25-batch`, the planned counts +
+  pull-row baseline in `details`), deletes in FK-safe order
+  (outbound → payment → event → lead → webhooklog), re-reads the pull-row
+  counts and hard-fails (`exitCode=1`) if any pull table changed.
+
+**Test-marker criteria (exactly):** `WebhookLog` where `platform='debug'`
+OR `rawPayload` has `_test`/`replay` → the `Event`s whose `webhookLogId`
+is one of those → a `Lead` **only if** it has ≥1 such test event and 0
+non-test events (a lead with even one real event is never touched; a bare
+0-event lead is preserved) → that lead's `Payment`/`OutboundEvent`.
+
+**Dry-run finding (the committed evidence):** 64 rows = **42 webhooklogs +
+22 events + 0 leads + 0 payments + 0 outbound**. The strict "zero
+non-test events" rule preserves every lead — in the live DB each lead that
+carries a test event also carries a real event (mixed: 1 test + 1 real),
+so the "146 Hot = bulk test" hypothesis does NOT translate to 146
+deletions. `Touchpoint` (17, ad-click records) is preserved. Pull-row
+baseline read-only: Ad 4214 · AdSet 1349 · AdCampaign 352 · Creative
+4214 · Spend 4214 · FxRate 5 · LiveRange 24.
+
+**Guardrails honoured:** dry-run writes 0; the destructive path is
+double-gated (the `--apply` flag + the typed `DELETE CONFIRMED`); delete +
+audit commit atomically in one transaction; pull rows read before/after
+and a mismatch hard-fails; `.d25-dryrun.txt` gitignored; no
+`.env`/`dev.db`/`.next`/scratch in the commit; never `next dev` next to
+prod.
+
+**Tests:** no new unit tests (a data-ops script). The gate is the full
+suite green + typecheck + build. **VERIFY:** `pnpm typecheck` 0 ·
+`pnpm test` 362/362 · `pnpm build` 0.
+
+**Commit:** ONE **normal** (non-`[REVIEW]`) commit — the script +
+`package.json` wiring + `.gitignore` + the 3 doc files + the `.d25-dryrun.txt`
+dry-run evidence (gitignored, so the committed evidence is the docs + this
+report, not the raw file). The actual `--apply` delete is a **local PO-gated
+operation** (type `DELETE CONFIRMED`); this commit records the dry-run
+finding, not the destructive run.
+
+**Next gate = PO runs `pnpm clean:test-data --apply`, types `DELETE
+CONFIRMED`, and records the post-clean DB totals (Leads / Events /
+Payments / WebhookLog) + the pull-row confirmation (must still be
+4214/1349/352/4214/4214/5/24) in the DB-hygiene row.**

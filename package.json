@@ -27,7 +27,8 @@
     "g3:measure": "tsx scripts/g3-measure.ts",
     "webhooks:refresh-url": "tsx scripts/refresh-webhook-urls.ts",
     "webhooks:clear-unsigned": "tsx scripts/unsigned-flexi.ts",
-    "backfill:flexi": "tsx scripts/backfill-flexi.ts"
+    "backfill:flexi": "tsx scripts/backfill-flexi.ts",
+    "clean:test-data": "tsx scripts/clean-test-data.ts"
   },
   "engines": {
     "node": ">=22"

@@ -1977,3 +1977,72 @@ indicator (never faked); the REAL nested Cashfree payload shape
 txn from `cf_payment_id`, kind from `PAYMENT_SUCCESS_WEBHOOK`; the
 /cashfree-leads empty-state 3-cause note + the indicator are asserted
 on the view source (the D-22/D-12 source-contract precedent).
+
+## D-25 — clean test/replay data from the DB: 2-layer safe/scoped delete, pull rows untouched (2026-11-27)
+
+**The ask:** the live DB carries test/replay ingest data (debug receipts,
+`_test`/`replay` payloads, a bulk of "Hot" leads) that pollutes the
+dashboard. Remove it SAFELY — a dry-run first, a confirmed delete after PO
+approval, and the G1/G4 **pull rows** (Ad / AdSet / AdCampaign / Creative /
+Spend / FxRate / LiveRange) NEVER touched.
+
+**The tool (`scripts/clean-test-data.ts`, `pnpm clean:test-data`):**
+- **LAYER 1 — DRY RUN (default, writes 0):** identifies + lists the test sets
+  to `.d25-dryrun.txt` (gitignored), count + first-5 samples per type, phones
+  masked to last-4. Ends with the exact delete plan + a
+  `PO: review …, then run pnpm clean:test-data --apply` line.
+- **LAYER 2 — `--apply` (PO-gated, local-only):** re-identifies the same
+  sets, prompts the PO to type exactly `DELETE CONFIRMED` on stdin (a
+  second confirmation step, not just the flag), then in one transaction:
+  writes ONE `AuditLog` row FIRST (`action=delete`, `entity=clean_test_data`,
+  `entityId=d25-batch`, the planned counts + the pull-row baseline in
+  `details`), then deletes in FK-safe order — outbound → payment → event →
+  lead → webhooklog — then re-reads the pull-row counts and FAILS LOUD
+  (`process.exitCode=1`) if any pull table changed. Appends the before/after
+  result to `.d25-dryrun.txt`.
+
+**What counts as "test" (the marker criteria, exactly):**
+- **test receipt** = `WebhookLog` where `platform='debug'` OR `rawPayload`
+  contains `_test` OR `replay`.
+- **test event** = `Event` whose `webhookLogId` is a test receipt.
+- **test lead** = a `Lead` with **≥1 test event AND 0 non-test events** — i.e.
+  a lead ONLY test events created. A lead with even one real event is
+  **NEVER** touched; a bare 0-event lead is **preserved** (it has no test
+  event to remove).
+- **test payment / outbound** = only those whose `leadId` is a test lead.
+
+**The strict rule makes the delete conservative by design.** The ticket's
+CONTEXT hypothesis ("146 Hot = bulk test/replay") does NOT translate to 146
+deletions: in the live DB every lead that carries a test event ALSO carries a
+real event (each is mixed: 1 test + 1 real), so the "zero non-test events"
+rule yields **0 test leads**. The safe outcome is therefore:
+
+| type | marker | delete |
+|---|---|---|
+| webhooklogs | 42 (platform=debug OR `_test`/`replay`) | **42** |
+| events | `webhookLogId` in the 42 | **22** |
+| leads | test-events-only (strict) | **0** |
+| payments | leadId in test-lead set | **0** |
+| outbound | leadId in test-lead set | **0** |
+| **total** | | **64 rows** |
+
+Pull-row baseline (read-only, must stay byte-identical):
+`Ad 4214 · AdSet 1349 · AdCampaign 352 · Creative 4214 · Spend 4214 ·
+FxRate 5 · LiveRange 24`. `Touchpoint` rows (17) are preserved — they are
+ad-click records, not test data.
+
+**Guardrails honoured:** dry-run writes 0; the destructive path is double-
+gated (the `--apply` flag + the typed `DELETE CONFIRMED`); deletion + audit
+commit atomically in one transaction; pull rows are read before/after and a
+mismatch hard-fails; `.d25-dryrun.txt` is gitignored (never in the commit);
+no `.env`/`dev.db`/`.next`/scratch in the commit; never `next dev` next to
+prod.
+
+**Status:** the DRY RUN is committed evidence (`.d25-dryrun.txt`: 42 receipts
++ 22 events, 0 leads/payments/outbound; pull-row baseline captured). The
+`--apply` delete is a **local PO-gated** operation (the ticket: "the actual
+`--apply` run is a local-only operation — the script is committed, the
+deletion result is recorded in docs, not the script's output"), so this commit
+ships the tool + the dry-run evidence + the docs; the PO runs
+`pnpm clean:test-data --apply` and records the post-clean totals.
+**VERIFY:** `pnpm typecheck` 0 · `pnpm test` 362/362 · `pnpm build` 0.
