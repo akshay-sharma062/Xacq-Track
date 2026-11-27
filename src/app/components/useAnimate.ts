@@ -14,7 +14,12 @@ export function useAnimate(staggerMs = 80) {
     const root = containerRef.current;
     if (!root) return;
 
-    const children = root.querySelectorAll<HTMLElement>(".animate-in");
+    const children = Array.from(root.querySelectorAll<HTMLElement>(".animate-in"));
+    // Also observe the container ITSELF when it carries .animate-in — the
+    // account-cards case where the ref sits ON the .animate-in div and its
+    // inner children are NOT .animate-in (descendants-only would find 0 and
+    // the block would stay stuck at opacity:0 = the "blank dashboard" bug).
+    if (root.classList.contains("animate-in")) children.unshift(root);
     if (children.length === 0) return;
 
     const obs = new IntersectionObserver(
@@ -22,7 +27,7 @@ export function useAnimate(staggerMs = 80) {
         entries.forEach((entry) => {
           if (entry.isIntersecting) {
             const el = entry.target as HTMLElement;
-            const idx = Array.from(children).indexOf(el);
+            const idx = children.indexOf(el);
             const delay = idx * staggerMs;
             setTimeout(() => el.classList.add("visible"), delay);
             obs.unobserve(el);

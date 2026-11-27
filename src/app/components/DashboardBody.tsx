@@ -167,7 +167,12 @@ export default function DashboardBody({
   );
 
   return (
-    <>
+    // ONE observer root wrapping every `.animate-in` block. (The blank-body
+    // bug: the same ref was previously attached to 3 sibling divs — React
+    // keeps only the last = the charts-row-2 div, whose children are NOT
+    // `.animate-in` — so `useAnimate` found 0 targets, never ran its
+    // observer, and the whole body stayed stuck at `opacity:0`.)
+    <div ref={animRef}>
       {/* ─── Client-profile band ─── */}
       {profile ? (
         <div className="card mb animate-in">
@@ -197,7 +202,7 @@ export default function DashboardBody({
       {/* ═══════════════════════════════════════════════════════
           D-20: Premium 8-card KPI grid
           ═══════════════════════════════════════════════════════ */}
-      <div ref={animRef} className="grid cols-2 mb" style={{ gridTemplateColumns: "repeat(4, 1fr)" }}>
+      <div className="grid cols-2 mb" style={{ gridTemplateColumns: "repeat(4, 1fr)" }}>
         <KpiCard
           gradient={ACCENT_GRADIENTS.spend}
           icon="💰"
@@ -268,7 +273,7 @@ export default function DashboardBody({
       {/* ═══════════════════════════════════════════════════════
           Charts Row 1 — Daily spend (LineChart) + Source mix (DonutChart)
           ═══════════════════════════════════════════════════════ */}
-      <div ref={animRef} className="grid cols-2 mb">
+      <div className="grid cols-2 mb">
         <ChartCard title="Daily ad spend (INR)" right={<span className="faint" style={{ fontSize: 11 }}>{rangeLabel}</span>}>
           <LineChart data={spendByDay} color="#4f8cff" unit="₹" label="Spend" />
           <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
@@ -299,7 +304,7 @@ export default function DashboardBody({
       {/* ═══════════════════════════════════════════════════════
           Charts Row 2 — Top campaigns (BarChartV2 horizontal) + ROAS gauge
           ═══════════════════════════════════════════════════════ */}
-      <div ref={animRef} className="grid cols-2 mb">
+      <div className="grid cols-2 mb">
         <ChartCard title="Top campaigns by spend 30d">
           {campaignData.length > 0 ? (
             <BarChartV2 data={campaignData} horizontal color="#4f8cff" unit="₹" />
@@ -428,7 +433,7 @@ export default function DashboardBody({
           </tbody>
         </table>
       </div>
-    </>
+    </div>
   );
 }
 
@@ -450,10 +455,26 @@ function KpiCard({
   return (
     <div className="card stat animate-in" style={{ position: "relative", overflow: "hidden" }}>
       <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 2, background: gradient, borderRadius: "2px 2px 0 0" }} />
-      <span className="k" style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.03em" }}>
-        <span style={{ fontSize: 16 }}>{icon}</span> {label}
-      </span>
-      <span className="v" style={{ fontSize: 22, marginTop: 4 }}>{value}</span>
+      {/* The FlexiFunnels card anatomy — the icon in a rounded tinted
+          chip beside the label, the big value below. The .card:hover CSS
+          already supplies the lift + shadow on hover. */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <span
+          aria-hidden
+          style={{
+            width: 38, height: 38, borderRadius: 9, flex: "0 0 38px",
+            display: "grid", placeItems: "center", fontSize: 18,
+            background: "rgba(79,140,255,0.10)",
+            border: "1px solid rgba(79,140,255,0.25)",
+          }}
+        >
+          {icon}
+        </span>
+        <span className="k" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.04em" }}>
+          {label}
+        </span>
+      </div>
+      <span className="v" style={{ fontSize: 30, marginTop: 10, letterSpacing: "-0.03em" }}>{value}</span>
     </div>
   );
 }
